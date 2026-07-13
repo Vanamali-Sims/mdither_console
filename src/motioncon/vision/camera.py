@@ -47,10 +47,10 @@ class Camera:
         ok, frame = self._capture.read()
         if not ok or frame is None:
             return None
+        image = np.asarray(frame, dtype=np.uint8)
         if self._mirror:
-            frame = cv2.flip(frame, 1)
-        result: npt.NDArray[np.uint8] = frame
-        return result
+            image = np.asarray(cv2.flip(image, 1), dtype=np.uint8)
+        return image
 
     def close(self) -> None:
         """Release the device."""

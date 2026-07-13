@@ -77,7 +77,9 @@ def _draw_hud(
         f"fps    {fps:.1f}",
     ]
     for i, line in enumerate(lines):
-        cv2.putText(canvas, line, (16, h - 16 - 22 * i), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA)
+        cv2.putText(
+            canvas, line, (16, h - 16 - 22 * i), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA
+        )
     return canvas
 
 
@@ -111,12 +113,15 @@ def run(settings: Settings) -> None:
     fps = 0.0
     last_time = time.perf_counter()
 
-    with Camera(
-        index=settings.camera_index,
-        width=settings.frame_width,
-        height=settings.frame_height,
-        mirror=settings.mirror,
-    ) as camera, JsonlLogger(settings.telemetry_path) as log:
+    with (
+        Camera(
+            index=settings.camera_index,
+            width=settings.frame_width,
+            height=settings.frame_height,
+            mirror=settings.mirror,
+        ) as camera,
+        JsonlLogger(settings.telemetry_path) as log,
+    ):
         while True:
             frame = camera.read()
             if frame is None:
@@ -154,7 +159,7 @@ def run(settings: Settings) -> None:
                 background=scheme.background,
                 brightness=grid,
             )
-            display = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
+            display = np.asarray(cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR), dtype=np.uint8)
             display = _draw_hud(display, menu, state, recognizer.cursor, last_event, fps)
             cv2.imshow(_WINDOW, display)
 

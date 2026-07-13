@@ -6,6 +6,7 @@ deterministic and testable with scripted streams. Stdlib only.
 
 from __future__ import annotations
 
+import math
 from typing import Protocol
 
 from motioncon.config import Event
@@ -55,7 +56,7 @@ class PushSelectDetector:
 def _magnitude(vector: tuple[float, float] | None) -> float | None:
     if vector is None:
         return None
-    return (vector[0] ** 2 + vector[1] ** 2) ** 0.5
+    return math.hypot(vector[0], vector[1])
 
 
 _SWIPES = {
@@ -142,7 +143,9 @@ class GestureRecognizer:
 
         assert state.velocity is not None
         vx, vy = state.velocity
-        axis, sign = ("x", 1 if vx > 0 else -1) if abs(vx) >= abs(vy) else ("y", 1 if vy > 0 else -1)
+        axis, sign = (
+            ("x", 1 if vx > 0 else -1) if abs(vx) >= abs(vy) else ("y", 1 if vy > 0 else -1)
+        )
         event = _SWIPES[(axis, sign)]
 
         self._swipe_armed = False

@@ -17,7 +17,7 @@ def to_gray(frame: npt.NDArray[np.uint8]) -> FloatArray:
 
     A 2-D input is treated as already grayscale and only rescaled.
     """
-    scaled = frame.astype(np.float32) / 255.0
+    scaled: FloatArray = (frame / 255.0).astype(np.float32)
     if scaled.ndim == 2:
         return scaled
     if scaled.ndim == 3 and scaled.shape[2] == 3:

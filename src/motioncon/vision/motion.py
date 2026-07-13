@@ -90,9 +90,7 @@ class MotionAnalyzer:
             velocity=self._drift_velocity(),
         )
 
-    def _dominant_centroid(
-        self, active: FloatArray, energy: float
-    ) -> tuple[float, float] | None:
+    def _dominant_centroid(self, active: FloatArray, energy: float) -> tuple[float, float] | None:
         if energy < self._min_energy:
             return None
 

@@ -24,7 +24,12 @@ class TestJsonlLogger:
         lines = path.read_text(encoding="utf-8").splitlines()
         assert len(lines) == 2
         first = json.loads(lines[0])
-        assert first == {"ts": 123.456, "kind": "gesture", "event": "SWIPE_LEFT", "cursor": [0.4, 0.6]}
+        assert first == {
+            "ts": 123.456,
+            "kind": "gesture",
+            "event": "SWIPE_LEFT",
+            "cursor": [0.4, 0.6],
+        }
         second = json.loads(lines[1])
         assert second["kind"] == "frame"
         assert second["energy"] == 0.02

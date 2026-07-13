@@ -76,7 +76,4 @@ def dither(signal: FloatArray, mode: DitherMode) -> MaskArray:
     """Dispatch to the requested dithering algorithm."""
     if mode is DitherMode.BAYER:
         return ordered_dither(signal)
-    if mode is DitherMode.FLOYD_STEINBERG:
-        return floyd_steinberg(signal)
-    msg = f"unknown dither mode: {mode}"
-    raise ValueError(msg)
+    return floyd_steinberg(signal)

@@ -59,9 +59,7 @@ class TestFrameDifference:
 
     def test_shape_mismatch_raises(self) -> None:
         with pytest.raises(ValueError, match="shapes differ"):
-            frame_difference(
-                np.zeros((2, 2), dtype=np.float32), np.zeros((3, 3), dtype=np.float32)
-            )
+            frame_difference(np.zeros((2, 2), dtype=np.float32), np.zeros((3, 3), dtype=np.float32))
 
 
 class TestBoost:
