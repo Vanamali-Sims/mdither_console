@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# Environments
+.venv/
+
+# Tooling caches
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Telemetry output
+telemetry/*.jsonl
+*.jsonl
+
+# OS / editor
+.DS_Store
+Thumbs.db
