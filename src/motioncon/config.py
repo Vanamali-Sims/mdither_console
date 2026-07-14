@@ -23,6 +23,7 @@ class ColorScheme(Enum):
     GREEN_ON_BLACK = ((40, 255, 120), (0, 0, 0))
     AMBER_ON_BLACK = ((255, 190, 40), (10, 5, 0))
     WHITE_ON_BLACK = ((235, 235, 235), (0, 0, 0))
+    BRUTALIST = ((255, 255, 255), (0, 0, 0))
 
     @property
     def foreground(self) -> tuple[int, int, int]:
@@ -64,7 +65,7 @@ class Settings:
 
     # Difference / trails
     trails_decay: float = 0.88
-    noise_floor: float = 0.06
+    noise_floor: float = 0.10
     signal_gain: float = 4.0
 
     # Motion analysis
@@ -72,22 +73,38 @@ class Settings:
     min_energy: float = 1e-4
     blob_cell_size: int = 16
     blob_window_cells: int = 3
-    velocity_window: int = 5
+    velocity_window: int = 6
+    min_track_area: float = 0.06
+    track_search_radius: float = 0.35
+    track_max_miss_frames: int = 8
+    track_candidates: int = 4
+    hand_zone_x: float = 0.38
+    keyboard_y: float = 0.82
+    intent_speed: float = 1.5
+    lock_duration_s: float = 2.0
+    max_centroid_step: float = 0.08
+    switch_margin: float = 1.3
 
     # Gestures
-    swipe_velocity_threshold: float = 1.2
+    swipe_velocity_threshold: float = 2.2
     swipe_release_factor: float = 0.5
-    event_cooldown_s: float = 0.35
-    double_swipe_window_s: float = 0.9
+    swipe_axis_dominance: float = 2.0
+    event_cooldown_s: float = 0.75
+    select_cooldown_s: float = 1.0
+    opposite_lockout_s: float = 1.0
+    double_swipe_window_s: float = 1.5
     cursor_smoothing: float = 0.5
+    swipe_min_travel: float = 0.33
 
-    # Push-to-select
-    select_energy_threshold: float = 0.18
+    # Push-to-select (blob area growth toward camera)
+    select_area_growth: float = 1.6
+    select_min_area: float = 0.06
     select_steady_speed: float = 0.6
+    select_history: int = 5
 
     # Rendering
     dither_mode: DitherMode = DitherMode.BAYER
-    color_scheme: ColorScheme = ColorScheme.GREEN_ON_BLACK
+    color_scheme: ColorScheme = ColorScheme.BRUTALIST
     cell_size: int = 8
     dot_radius: float = 0.38
 

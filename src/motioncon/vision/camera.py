@@ -37,6 +37,8 @@ class Camera:
             raise RuntimeError(msg)
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, self._width)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, self._height)
+        capture.set(cv2.CAP_PROP_FPS, 30)
+        capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
         self._capture = capture
 
     def read(self) -> npt.NDArray[np.uint8] | None:
@@ -47,10 +49,10 @@ class Camera:
         ok, frame = self._capture.read()
         if not ok or frame is None:
             return None
-        image = np.asarray(frame, dtype=np.uint8)
         if self._mirror:
-            image = np.asarray(cv2.flip(image, 1), dtype=np.uint8)
-        return image
+            frame = cv2.flip(frame, 1)
+        result: npt.NDArray[np.uint8] = frame
+        return result
 
     def close(self) -> None:
         """Release the device."""

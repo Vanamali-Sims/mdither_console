@@ -72,7 +72,7 @@ timelines.
   `signal -> dither mask -> RGB array`; a GPU implementation replaces
   `render/` behind the same array-in/array-out boundary.
 - **Select strategies:** `control/gestures.SelectDetector` is a `Protocol`;
-  the default `PushSelectDetector` (energy spike near a steady cursor) can be
-  swapped for dwell, pinch, etc. via constructor injection.
+  the default `SizeGrowSelectDetector` (blob area growing toward the camera)
+  can be swapped for dwell, pinch, etc. via constructor injection.
 - **HCI analysis:** every gesture, selection, and frame metric is already logged
   as JSONL by `telemetry/logger.py`; the analysis phase only needs to read it.

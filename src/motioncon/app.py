@@ -15,7 +15,7 @@ import numpy as np
 import numpy.typing as npt
 
 from motioncon.config import DitherMode, Event, Settings
-from motioncon.control.gestures import GestureRecognizer, PushSelectDetector
+from motioncon.control.gestures import GestureRecognizer, SizeGrowSelectDetector
 from motioncon.render.dither import dither
 from motioncon.render.dots import downsample, render_dots
 from motioncon.telemetry.logger import JsonlLogger
@@ -45,6 +45,10 @@ _DEMO_MENU = (
     MenuItem("About", action="about"),
 )
 
+_WHITE = (255, 255, 255)
+_BLACK = (0, 0, 0)
+_PURPLE = (255, 80, 220)
+
 
 def _draw_hud(
     canvas: npt.NDArray[np.uint8],
@@ -54,32 +58,42 @@ def _draw_hud(
     last_event: Event | None,
     fps: float,
 ) -> npt.NDArray[np.uint8]:
-    """Overlay menu, cursor marker, and status text onto a BGR canvas."""
+    """Brutalist overlay: hard borders, inverse selection, status strip."""
     h, w = canvas.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
+    menu_h = 32 + 36 * len(menu.items)
+
+    cv2.rectangle(canvas, (8, 8), (280, menu_h), _WHITE, 2)
+    if menu.can_go_back:
+        cv2.putText(canvas, "BACK: DOUBLE-SWIPE-LEFT", (16, 30), font, 0.45, _WHITE, 1, cv2.LINE_AA)
 
     for i, item in enumerate(menu.items):
+        y = 60 + 36 * i
         selected = i == menu.selected_index
-        label = ("> " if selected else "  ") + item.label
-        color = (80, 255, 160) if selected else (150, 150, 150)
-        cv2.putText(canvas, label, (16, 60 + 28 * i), font, 0.7, color, 2, cv2.LINE_AA)
-    if menu.can_go_back:
-        cv2.putText(canvas, "[double-swipe-left: back]", (16, 32), font, 0.5, (120, 120, 120), 1)
+        label = item.label.upper()
+        if selected:
+            cv2.rectangle(canvas, (12, y - 22), (272, y + 8), _WHITE, -1)
+            cv2.putText(canvas, label, (20, y), font, 0.65, _BLACK, 2, cv2.LINE_AA)
+        else:
+            cv2.putText(canvas, label, (20, y), font, 0.65, _WHITE, 2, cv2.LINE_AA)
 
     if cursor is not None:
         cx, cy = int(cursor[0] * (w - 1)), int(cursor[1] * (h - 1))
-        cv2.drawMarker(canvas, (cx, cy), (60, 200, 255), cv2.MARKER_CROSS, 24, 2)
+        arm = 14
+        cv2.line(canvas, (cx - arm, cy), (cx + arm, cy), _PURPLE, 2)
+        cv2.line(canvas, (cx, cy - arm), (cx, cy + arm), _PURPLE, 2)
 
-    lines = [
-        f"energy {state.energy:.4f}",
-        f"cursor {cursor[0]:.2f},{cursor[1]:.2f}" if cursor else "cursor -",
-        f"event  {last_event.name if last_event else '-'}",
-        f"fps    {fps:.1f}",
-    ]
-    for i, line in enumerate(lines):
-        cv2.putText(
-            canvas, line, (16, h - 16 - 22 * i), font, 0.55, (200, 200, 200), 1, cv2.LINE_AA
-        )
+    strip_h = 28
+    cv2.rectangle(canvas, (0, h - strip_h), (w, h), _BLACK, -1)
+    cv2.line(canvas, (0, h - strip_h), (w, h - strip_h), _WHITE, 2)
+    lock_txt = f"{state.lock_remaining_s:.1f}S" if state.track_locked else "OFF"
+    sel = menu.selected_item.label.upper()
+    status = (
+        f"SEL {menu.selected_index + 1}/{len(menu.items)} {sel} | "
+        f"AREA {state.blob_area:.2f} | LOCK {lock_txt} | "
+        f"EVT {last_event.name if last_event else '-'} | FPS {fps:.0f}"
+    )
+    cv2.putText(canvas, status, (12, h - 8), font, 0.5, _WHITE, 1, cv2.LINE_AA)
     return canvas
 
 
@@ -92,16 +106,34 @@ def run(settings: Settings) -> None:
         cell_size=settings.blob_cell_size,
         window_cells=settings.blob_window_cells,
         velocity_window=settings.velocity_window,
+        min_track_area=settings.min_track_area,
+        track_search_radius=settings.track_search_radius,
+        track_max_miss_frames=settings.track_max_miss_frames,
+        track_candidates=settings.track_candidates,
+        hand_zone_x=settings.hand_zone_x,
+        keyboard_y=settings.keyboard_y,
+        intent_speed=settings.intent_speed,
+        lock_duration_s=settings.lock_duration_s,
+        max_centroid_step=settings.max_centroid_step,
+        switch_margin=settings.switch_margin,
     )
     recognizer = GestureRecognizer(
         swipe_velocity_threshold=settings.swipe_velocity_threshold,
         swipe_release_factor=settings.swipe_release_factor,
+        swipe_axis_dominance=settings.swipe_axis_dominance,
         event_cooldown_s=settings.event_cooldown_s,
+        select_cooldown_s=settings.select_cooldown_s,
+        opposite_lockout_s=settings.opposite_lockout_s,
         double_swipe_window_s=settings.double_swipe_window_s,
         cursor_smoothing=settings.cursor_smoothing,
-        select_detector=PushSelectDetector(
-            energy_threshold=settings.select_energy_threshold,
+        min_track_area=settings.min_track_area,
+        swipe_min_travel=settings.swipe_min_travel,
+        select_steady_speed=settings.select_steady_speed,
+        select_detector=SizeGrowSelectDetector(
+            area_growth=settings.select_area_growth,
+            min_area=settings.select_min_area,
             steady_speed=settings.select_steady_speed,
+            history=settings.select_history,
         ),
     )
     menu = Menu(_DEMO_MENU)
@@ -144,10 +176,25 @@ def run(settings: Settings) -> None:
             for event in recognizer.update(state):
                 last_event = event
                 action = menu.handle_event(event)
-                log.log("gesture", event=event.name, cursor=recognizer.cursor)
+                log.log(
+                    "gesture",
+                    event=event.name,
+                    cursor=recognizer.cursor,
+                    menu_index=menu.selected_index,
+                    menu_item=menu.selected_item.label,
+                )
                 if action is not None:
-                    log.log("selection", action=action)
-            log.log("frame", energy=state.energy, centroid=state.centroid, fps=round(fps, 2))
+                    log.log("selection", action=action, menu_index=menu.selected_index)
+            log.log(
+                "frame",
+                energy=state.energy,
+                blob_area=state.blob_area,
+                centroid=state.centroid,
+                track_locked=state.track_locked,
+                lock_remaining_s=round(state.lock_remaining_s, 2),
+                top_score=round(state.top_score, 3),
+                fps=round(fps, 2),
+            )
 
             grid = downsample(boost(trail_signal, settings.signal_gain), settings.cell_size)
             mask = dither(grid, dither_mode)
@@ -159,7 +206,7 @@ def run(settings: Settings) -> None:
                 background=scheme.background,
                 brightness=grid,
             )
-            display = np.asarray(cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR), dtype=np.uint8)
+            display = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
             display = _draw_hud(display, menu, state, recognizer.cursor, last_event, fps)
             cv2.imshow(_WINDOW, display)
 
