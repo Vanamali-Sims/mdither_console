@@ -86,9 +86,10 @@ class Settings:
     switch_margin: float = 1.3
 
     # Gestures
-    swipe_velocity_threshold: float = 2.2
+    swipe_intent_speed: float = 0.10
     swipe_release_factor: float = 0.5
     swipe_axis_dominance: float = 2.0
+    swipe_max_duration_s: float = 3.0
     event_cooldown_s: float = 0.75
     select_cooldown_s: float = 1.0
     opposite_lockout_s: float = 1.0
@@ -97,7 +98,7 @@ class Settings:
     swipe_min_travel: float = 0.33
 
     # Push-to-select (blob area growth toward camera)
-    select_area_growth: float = 1.6
+    select_area_growth: float = 1.8
     select_min_area: float = 0.06
     select_steady_speed: float = 0.6
     select_history: int = 5
@@ -110,3 +111,5 @@ class Settings:
 
     # Telemetry
     telemetry_path: str = "telemetry.jsonl"
+    telemetry_enabled: bool = True
+    telemetry_frame_stride: int = 3

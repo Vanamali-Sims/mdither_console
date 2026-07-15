@@ -54,7 +54,7 @@ def _draw_hud(
     canvas: npt.NDArray[np.uint8],
     menu: Menu,
     state: MotionState,
-    cursor: tuple[float, float] | None,
+    recognizer: GestureRecognizer,
     last_event: Event | None,
     fps: float,
 ) -> npt.NDArray[np.uint8]:
@@ -62,6 +62,7 @@ def _draw_hud(
     h, w = canvas.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
     menu_h = 32 + 36 * len(menu.items)
+    cursor = recognizer.cursor
 
     cv2.rectangle(canvas, (8, 8), (280, menu_h), _WHITE, 2)
     if menu.can_go_back:
@@ -88,9 +89,14 @@ def _draw_hud(
     cv2.line(canvas, (0, h - strip_h), (w, h - strip_h), _WHITE, 2)
     lock_txt = f"{state.lock_remaining_s:.1f}S" if state.track_locked else "OFF"
     sel = menu.selected_item.label.upper()
+    travel_txt = ""
+    if recognizer.swipe_travel > 0.0:
+        travel_txt = (
+            f" | TRAVEL {recognizer.swipe_travel:.2f}/{recognizer.swipe_min_travel:.2f}"
+        )
     status = (
         f"SEL {menu.selected_index + 1}/{len(menu.items)} {sel} | "
-        f"AREA {state.blob_area:.2f} | LOCK {lock_txt} | "
+        f"AREA {state.blob_area:.2f} | LOCK {lock_txt}{travel_txt} | "
         f"EVT {last_event.name if last_event else '-'} | FPS {fps:.0f}"
     )
     cv2.putText(canvas, status, (12, h - 8), font, 0.5, _WHITE, 1, cv2.LINE_AA)
@@ -118,9 +124,10 @@ def run(settings: Settings) -> None:
         switch_margin=settings.switch_margin,
     )
     recognizer = GestureRecognizer(
-        swipe_velocity_threshold=settings.swipe_velocity_threshold,
+        swipe_intent_speed=settings.swipe_intent_speed,
         swipe_release_factor=settings.swipe_release_factor,
         swipe_axis_dominance=settings.swipe_axis_dominance,
+        swipe_max_duration_s=settings.swipe_max_duration_s,
         event_cooldown_s=settings.event_cooldown_s,
         select_cooldown_s=settings.select_cooldown_s,
         opposite_lockout_s=settings.opposite_lockout_s,
@@ -144,6 +151,7 @@ def run(settings: Settings) -> None:
     last_event: Event | None = None
     fps = 0.0
     last_time = time.perf_counter()
+    frame_counter = 0
 
     with (
         Camera(
@@ -176,25 +184,40 @@ def run(settings: Settings) -> None:
             for event in recognizer.update(state):
                 last_event = event
                 action = menu.handle_event(event)
-                log.log(
-                    "gesture",
-                    event=event.name,
-                    cursor=recognizer.cursor,
-                    menu_index=menu.selected_index,
-                    menu_item=menu.selected_item.label,
-                )
-                if action is not None:
-                    log.log("selection", action=action, menu_index=menu.selected_index)
-            log.log(
-                "frame",
-                energy=state.energy,
-                blob_area=state.blob_area,
-                centroid=state.centroid,
-                track_locked=state.track_locked,
-                lock_remaining_s=round(state.lock_remaining_s, 2),
-                top_score=round(state.top_score, 3),
-                fps=round(fps, 2),
-            )
+                if settings.telemetry_enabled:
+                    log.log(
+                        "gesture",
+                        event=event.name,
+                        cursor=recognizer.cursor,
+                        menu_index=menu.selected_index,
+                        menu_item=menu.selected_item.label,
+                        flush=True,
+                    )
+                    if action is not None:
+                        log.log(
+                            "selection",
+                            action=action,
+                            menu_index=menu.selected_index,
+                            flush=True,
+                        )
+            if settings.telemetry_enabled:
+                frame_counter += 1
+                if frame_counter % settings.telemetry_frame_stride == 0:
+                    log.log(
+                        "frame",
+                        energy=state.energy,
+                        blob_area=state.blob_area,
+                        centroid=state.centroid,
+                        track_locked=state.track_locked,
+                        lock_remaining_s=round(state.lock_remaining_s, 2),
+                        top_score=round(state.top_score, 3),
+                        fps=round(fps, 2),
+                        cursor=recognizer.cursor,
+                        cursor_speed=round(recognizer.cursor_speed, 3)
+                        if recognizer.cursor_speed is not None
+                        else None,
+                        swipe_travel=round(recognizer.swipe_travel, 3),
+                    )
 
             grid = downsample(boost(trail_signal, settings.signal_gain), settings.cell_size)
             mask = dither(grid, dither_mode)
@@ -207,7 +230,7 @@ def run(settings: Settings) -> None:
                 brightness=grid,
             )
             display = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
-            display = _draw_hud(display, menu, state, recognizer.cursor, last_event, fps)
+            display = _draw_hud(display, menu, state, recognizer, last_event, fps)
             cv2.imshow(_WINDOW, display)
 
             key = cv2.waitKey(1) & 0xFF

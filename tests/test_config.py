@@ -32,6 +32,9 @@ class TestSettings:
         assert 0.0 < s.max_centroid_step < 1.0
         assert s.switch_margin >= 1.0
         assert 0.0 < s.swipe_min_travel <= 1.0
+        assert s.swipe_intent_speed > 0.0
+        assert s.swipe_max_duration_s > 0.0
+        assert s.telemetry_frame_stride >= 1
         assert s.double_swipe_window_s > s.event_cooldown_s
 
     def test_immutable(self) -> None:

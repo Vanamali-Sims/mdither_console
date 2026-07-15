@@ -37,15 +37,15 @@ uv run motioncon --camera 1 # pick a device index
 
 | Input | Effect |
 | --- | --- |
-| Move hand (left/right zones) | Cursor locks for 2s on the spatially-scored target |
-| Swipe left / right / up / down | Step the menu (must travel 33% of screen while locked) |
+| Move hand (left/right zones) | Purple cursor tracks your hand; spatial lock keeps it on target |
+| Swipe left / right / up / down | Step the menu once you travel **33% of the screen** along that axis (speed does not matter) |
 | Double swipe left | Back (pop one menu level) |
-| Push hand toward camera | Select when the motion blob grows in size |
+| Push hand toward camera (hold still) | Select when the motion blob grows in size |
 | `d` key | Toggle dither algorithm (Bayer / Floyd–Steinberg) |
 | `q` or `Esc` | Quit |
 
-The HUD shows motion energy, blob patch fill (area), cursor position, the last gesture event, and FPS.
-Gestures, selections, and per-frame metrics are appended to `telemetry.jsonl`.
+The HUD shows the selected menu item, blob area, lock timer, swipe travel progress (`TRAVEL 0.21/0.33`), last gesture, and FPS.
+Gestures are always logged to `telemetry.jsonl`; frame metrics are logged every 3rd frame to keep FPS up.
 
 ## Development
 

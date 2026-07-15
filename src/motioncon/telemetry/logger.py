@@ -15,12 +15,19 @@ class JsonlLogger:
 
     Every gesture, selection, and frame metric goes through here so the later
     analysis phase has raw data to work with. The clock is injectable for
-    deterministic tests.
+    deterministic tests. Disk flush is batched to avoid per-frame sync cost.
     """
 
-    def __init__(self, path: str | Path, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        clock: Callable[[], float] = time.time,
+        flush_every: int = 30,
+    ) -> None:
         self._path = Path(path)
         self._clock = clock
+        self._flush_every = max(flush_every, 1)
+        self._since_flush = 0
         self._file: TextIO | None = None
 
     def open(self) -> None:
@@ -28,20 +35,25 @@ class JsonlLogger:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._file = self._path.open("a", encoding="utf-8")
 
-    def log(self, kind: str, **data: Any) -> None:
+    def log(self, kind: str, *, flush: bool = False, **data: Any) -> None:
         """Append one record: ``{"ts": ..., "kind": ..., **data}``."""
         if self._file is None:
             msg = "logger is not open"
             raise RuntimeError(msg)
         record = {"ts": self._clock(), "kind": kind, **data}
         self._file.write(json.dumps(record) + "\n")
-        self._file.flush()
+        self._since_flush += 1
+        if flush or self._since_flush >= self._flush_every:
+            self._file.flush()
+            self._since_flush = 0
 
     def close(self) -> None:
         """Flush and close the file."""
         if self._file is not None:
+            self._file.flush()
             self._file.close()
             self._file = None
+            self._since_flush = 0
 
     def __enter__(self) -> JsonlLogger:
         self.open()
