@@ -14,28 +14,25 @@ class TestSettings:
         s = Settings()
         assert 0.0 <= s.trails_decay <= 1.0
         assert 0.0 <= s.noise_floor < 1.0
-        assert 0.0 < s.motion_threshold < 1.0
-        assert 0.0 < s.min_track_area <= 0.1
-        assert 0.0 < s.track_search_radius <= 1.0
-        assert s.track_max_miss_frames >= 1
         assert s.cell_size >= 1
         assert 0.0 < s.dot_radius <= 0.5
-        assert s.event_cooldown_s > 0.0
-        assert s.select_cooldown_s > 0.0
-        assert s.opposite_lockout_s >= s.event_cooldown_s
-        assert s.swipe_axis_dominance >= 1.0
-        assert s.select_area_growth > 1.0
-        assert s.select_min_area > 0.0
-        assert s.select_history >= 2
-        assert s.lock_duration_s > 0.0
-        assert s.track_candidates >= 1
-        assert 0.0 < s.max_centroid_step < 1.0
-        assert s.switch_margin >= 1.0
-        assert 0.0 < s.swipe_min_travel <= 1.0
-        assert s.swipe_intent_speed > 0.0
-        assert s.swipe_max_duration_s > 0.0
+        assert s.flow_width > 0 and s.flow_height > 0
+        assert s.flow_mag_floor > 0.0
+        assert 0.0 <= s.ignore_bottom < 1.0
+        assert 0.0 <= s.gesture_band[0] < s.gesture_band[1] <= 1.0
+        assert s.gesture_band[1] <= 1.0 - s.ignore_bottom
+        assert 0.0 < s.presence_floor < 1.0
+        assert 0.0 < s.quiet_frac < 1.0
+        assert s.settle_s > 0.0
+        assert s.settle_mag < s.flick_mag
+        assert s.arm_window_s > 0.0
+        assert 0.0 <= s.coherence_collapse < s.coh_min <= 1.0
+        assert s.axis_dominance >= 1.0
+        assert s.impulse_thresh > 0.0
+        assert s.stroke_max_s > 0.0
+        assert s.refractory_s > 0.0
+        assert s.opp_lockout_s >= s.refractory_s
         assert s.telemetry_frame_stride >= 1
-        assert s.double_swipe_window_s > s.event_cooldown_s
 
     def test_immutable(self) -> None:
         s = Settings()
@@ -47,12 +44,9 @@ class TestEnums:
     def test_all_gesture_events_exist(self) -> None:
         names = {e.name for e in Event}
         assert names == {
+            "FLICK_UP",
+            "FLICK_DOWN",
             "SWIPE_LEFT",
-            "SWIPE_RIGHT",
-            "SWIPE_UP",
-            "SWIPE_DOWN",
-            "DOUBLE_SWIPE_LEFT",
-            "SELECT",
         }
 
     def test_color_schemes_expose_rgb_pairs(self) -> None:

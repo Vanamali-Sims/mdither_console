@@ -23,7 +23,7 @@ def to_gray(frame: npt.NDArray[np.uint8]) -> FloatArray:
     if scaled.ndim == 3 and scaled.shape[2] == 3:
         # ITU-R BT.601 luma weights.
         weights = np.array([0.299, 0.587, 0.114], dtype=np.float32)
-        gray: FloatArray = scaled @ weights
+        gray: FloatArray = (scaled @ weights).astype(np.float32)
         return gray
     msg = f"expected (H, W) or (H, W, 3) frame, got shape {frame.shape}"
     raise ValueError(msg)

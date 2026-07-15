@@ -17,6 +17,10 @@ dist/
 telemetry/*.jsonl
 *.jsonl
 
+# Locally recorded evaluation clips; keep the regression baseline trackable
+data/clips/*
+!data/clips/baseline.json
+
 # OS / editor
 .DS_Store
 Thumbs.db

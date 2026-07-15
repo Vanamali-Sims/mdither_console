@@ -41,20 +41,17 @@ class ColorScheme(Enum):
 class Event(Enum):
     """Discrete gesture events emitted by the control layer."""
 
+    FLICK_UP = auto()
+    FLICK_DOWN = auto()
     SWIPE_LEFT = auto()
-    SWIPE_RIGHT = auto()
-    SWIPE_UP = auto()
-    SWIPE_DOWN = auto()
-    DOUBLE_SWIPE_LEFT = auto()
-    SELECT = auto()
 
 
 @dataclass(frozen=True, slots=True)
 class Settings:
     """All tunable parameters, grouped in one immutable place.
 
-    Units: normalized image coordinates are in ``[0, 1]`` with the origin at the
-    top-left; velocities are in normalized units per second; times in seconds.
+    Flow magnitudes and impulses are measured in downscaled pixels per frame.
+    Zone coordinates are normalized to ``[0, 1]`` from the top of the image.
     """
 
     # Camera (I/O edge)
@@ -68,40 +65,27 @@ class Settings:
     noise_floor: float = 0.10
     signal_gain: float = 4.0
 
-    # Motion analysis
-    motion_threshold: float = 0.12
-    min_energy: float = 1e-4
-    blob_cell_size: int = 16
-    blob_window_cells: int = 3
-    velocity_window: int = 6
-    min_track_area: float = 0.06
-    track_search_radius: float = 0.35
-    track_max_miss_frames: int = 8
-    track_candidates: int = 4
-    hand_zone_x: float = 0.38
-    keyboard_y: float = 0.82
-    intent_speed: float = 1.5
-    lock_duration_s: float = 2.0
-    max_centroid_step: float = 0.08
-    switch_margin: float = 1.3
+    # Dense optical flow
+    flow_width: int = 96
+    flow_height: int = 72
+    flow_mag_floor: float = 0.35
+    ignore_bottom: float = 0.15
+    gesture_band: tuple[float, float] = (0.25, 0.85)
 
-    # Gestures
-    swipe_intent_speed: float = 0.10
-    swipe_release_factor: float = 0.5
-    swipe_axis_dominance: float = 2.0
-    swipe_max_duration_s: float = 3.0
-    event_cooldown_s: float = 0.75
-    select_cooldown_s: float = 1.0
-    opposite_lockout_s: float = 1.0
-    double_swipe_window_s: float = 1.5
-    cursor_smoothing: float = 0.5
-    swipe_min_travel: float = 0.33
-
-    # Push-to-select (blob area growth toward camera)
-    select_area_growth: float = 1.8
-    select_min_area: float = 0.06
-    select_steady_speed: float = 0.6
-    select_history: int = 5
+    # Burst→quiet directional gestures
+    presence_floor: float = 0.015
+    quiet_frac: float = 0.02
+    settle_s: float = 0.25
+    settle_mag: float = 0.35
+    arm_window_s: float = 3.0
+    coh_min: float = 0.60
+    coherence_collapse: float = 0.35
+    flick_mag: float = 0.75
+    axis_dominance: float = 1.8
+    impulse_thresh: float = 3.0
+    stroke_max_s: float = 0.50
+    refractory_s: float = 0.40
+    opp_lockout_s: float = 0.70
 
     # Rendering
     dither_mode: DitherMode = DitherMode.BAYER

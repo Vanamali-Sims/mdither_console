@@ -51,7 +51,7 @@ class Camera:
             return None
         if self._mirror:
             frame = cv2.flip(frame, 1)
-        result: npt.NDArray[np.uint8] = frame
+        result: npt.NDArray[np.uint8] = np.asarray(frame, dtype=np.uint8)
         return result
 
     def close(self) -> None:

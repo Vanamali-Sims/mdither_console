@@ -30,9 +30,8 @@ class _Level:
 class Menu:
     """A list of items, a selection index, and a back-stack.
 
-    Swipes step the selection (up/left = previous, down/right = next, with
-    wrap-around), SELECT descends into submenus or activates leaves, and
-    DOUBLE_SWIPE_LEFT pops back one level.
+    Vertical flicks step the selection with wrap-around. A left swipe pops back
+    one level. Selection is deliberately outside the v1 gesture vocabulary.
     """
 
     def __init__(self, items: tuple[MenuItem, ...] | list[MenuItem]) -> None:
@@ -68,20 +67,14 @@ class Menu:
         return len(self._stack) > 1
 
     def handle_event(self, event: Event) -> str | None:
-        """Apply one gesture event; return the activated action id, if any."""
+        """Apply one gesture event."""
         level = self._stack[-1]
-        if event in (Event.SWIPE_UP, Event.SWIPE_LEFT):
+        if event is Event.FLICK_UP:
             level.index = (level.index - 1) % len(level.items)
-        elif event in (Event.SWIPE_DOWN, Event.SWIPE_RIGHT):
+        elif event is Event.FLICK_DOWN:
             level.index = (level.index + 1) % len(level.items)
-        elif event is Event.DOUBLE_SWIPE_LEFT:
+        elif event is Event.SWIPE_LEFT:
             self.back()
-        elif event is Event.SELECT:
-            item = self.selected_item
-            if item.is_submenu:
-                self._stack.append(_Level(items=item.children))
-            else:
-                return item.action if item.action is not None else item.label
         return None
 
     def back(self) -> bool:

@@ -1,1 +1,1 @@
-"""Vision layer: camera I/O edge plus pure frame-differencing and motion analysis."""
+"""Vision layer: camera I/O, frame differencing, and dense optical flow."""

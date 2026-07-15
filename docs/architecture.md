@@ -1,78 +1,58 @@
 # Architecture
 
-## The one rule: pure core, I/O edges
+## I/O edges and deterministic core
 
-All pixel math, motion analysis, gesture logic, and UI state are **pure**: they
-depend only on NumPy and the standard library, take arrays/values in and return
-values out, and never touch a camera, a file, a window, or OpenCV. That is what
-makes the whole pipeline unit-testable with synthetic arrays — no webcam needed.
+Camera capture, windows, clip files, and telemetry are I/O edges. Array transforms and
+gesture decisions have no I/O. `vision/flow.py` uses NumPy plus
+`cv2.calcOpticalFlowFarneback`; `control/flick.py` uses only the standard library and
+derives every transition from sample timestamps.
 
-OpenCV and I/O are confined to three edges:
-
-| Edge | Responsibility |
-| --- | --- |
-| `vision/camera.py` | `cv2.VideoCapture` wrapper: open, read BGR frames, mirror, release |
-| `telemetry/logger.py` | append timestamped JSONL records to disk |
-| `app.py` | the loop: wiring, HUD text, `imshow`, key handling — **no algorithms** |
-
-If a change makes any other module import `cv2` or open a file, it is in the
-wrong place.
-
-## Control and visualization are decoupled
-
-Both consume the same motion signal but neither knows the other exists:
+## Independent visual and control paths
 
 ```mermaid
 flowchart LR
-    Camera[vision/camera.py IO] -->|BGR frames| Diff[vision/difference.py]
-    Diff -->|"difference signal [0,1]"| Motion[vision/motion.py]
-    Diff -->|trails signal| Dither[render/dither.py]
-    Motion -->|MotionState| Gestures[control/gestures.py]
-    Dither -->|"{0,1} mask"| Dots[render/dots.py]
-    Gestures -->|events| Menu[ui/menu.py]
-    Gestures -->|cursor| App[app.py IO loop]
+    Camera[vision/camera.py] --> Gray[grayscale frame]
+    Gray --> Diff[vision/difference.py]
+    Diff --> Trails[trails + dither dots]
+    Gray --> Flow[vision/flow.py]
+    Flow -->|FlowState| Flick[control/flick.py]
+    Flick -->|3 events| Menu[ui/menu.py]
+    App[app.py] --> Camera
+    Trails --> App
     Menu --> App
-    Dots -->|RGB canvas| App
-    App --> Telemetry[telemetry/logger.py IO]
+    Flow --> Telemetry[telemetry/logger.py]
+    Flick --> Telemetry
 ```
 
-- The **control path** (`vision/motion.py` -> `control/gestures.py` -> `ui/menu.py`)
-  reduces the difference signal to a `MotionState` (centroid, energy, velocity),
-  then to discrete events, then to menu state.
-- The **visualization path** (`vision/difference.py` trails -> `render/dither.py` ->
-  `render/dots.py`) turns the same signal into the dithered dot field.
+Frame differencing remains only for the visual trails. It is not an input to gesture
+control. Dense flow never tracks a centroid or any other position.
 
-Either side can be replaced without touching the other: a different renderer sees
-the same signal; a different tracker feeds the same event types into the menu.
+## Direction sample contract
 
-## Module map
+`FlowState` contains:
 
-| Module | Pure? | What it does |
-| --- | --- | --- |
-| `config.py` | pure (stdlib) | `Settings` dataclass, `DitherMode` / `ColorScheme` / `Event` enums |
-| `vision/difference.py` | pure | grayscale, temporal difference in `[0,1]`, `TrailsAccumulator` (`accum = max(signal, accum*decay)`) |
-| `vision/motion.py` | pure | dominant-blob centroid, change energy, centroid-drift velocity -> `MotionState` |
-| `vision/camera.py` | I/O | OpenCV capture wrapper |
-| `control/gestures.py` | pure | debounced state machine: `MotionState` stream -> swipe/select events; analog cursor |
-| `render/dither.py` | pure | Bayer (ordered) and Floyd–Steinberg dithering: signal -> `{0,1}` mask |
-| `render/dots.py` | pure | vectorized mask -> colored dot canvas |
-| `ui/menu.py` | pure | items, selection index, back-stack; reacts to events |
-| `telemetry/logger.py` | I/O | append JSONL timestamped events |
-| `app.py` | I/O | wires everything; HUD; keys |
+- `mean_flow`: magnitude-weighted mean `(x, y)` flow over active pixels
+- `coherence`: net vector magnitude divided by total vector magnitude
+- `active_frac`: active fraction inside the gesture band
+- `timestamp`: the caller-provided monotonic time
 
-All timing in pure modules flows through `MotionState.timestamp` — no module
-calls `time.time()` except the I/O edges — so gesture tests can script exact
-timelines.
+`FlickDetector` consumes a structural `DirectionSample` protocol with those fields.
+A future wrist-velocity source can therefore be evaluated through the same detector
+and offline harness after adapting its samples to the same units.
 
-## Seams left for later milestones
+## Presence-gated gesture lifecycle
 
-- **Tracker benchmark (MediaPipe):** anything that produces `MotionState` values
-  can replace `MotionAnalyzer`; the gesture layer only sees the dataclass.
-- **GPU renderer (moderngl/GLSL):** the renderer contract is
-  `signal -> dither mask -> RGB array`; a GPU implementation replaces
-  `render/` behind the same array-in/array-out boundary.
-- **Select strategies:** `control/gestures.SelectDetector` is a `Protocol`;
-  the default `SizeGrowSelectDetector` (blob area growing toward the camera)
-  can be swapped for dwell, pinch, etc. via constructor injection.
-- **HCI analysis:** every gesture, selection, and frame metric is already logged
-  as JSONL by `telemetry/logger.py`; the analysis phase only needs to read it.
+The detector runs through `EMPTY -> ENTRY -> SETTLE -> ARMED -> STROKE -> FIRED`.
+Motion entering the band is suppressed. The detector arms only after low mean motion
+persists for the configured settle period. A stroke requires coherent, axis-dominant
+flow and fires after its signed impulse reaches threshold. Refractory and
+opposite-direction lockouts reject the hand's return stroke.
+
+Only `FLICK_UP`, `FLICK_DOWN`, and `SWIPE_LEFT` exist in v1.
+
+## Reliability harness
+
+`tools/record_clips.py` records labeled video plus per-frame timestamp sidecars.
+`tools/eval_detector.py` runs the exact live pipeline offline and reports per-label
+precision, recall, distractor false-positive rates, latency, and a confusion summary.
+Stored baseline JSON files turn metric regressions into a nonzero process exit.

@@ -1,1 +1,1 @@
-"""Control layer: pure gesture recognition over the motion signal."""
+"""Control layer: pure gesture recognition over direction samples."""

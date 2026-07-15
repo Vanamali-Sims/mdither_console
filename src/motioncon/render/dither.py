@@ -7,6 +7,8 @@ by nature and kept as a quality option. NumPy + stdlib only.
 
 from __future__ import annotations
 
+from typing import assert_never
+
 import numpy as np
 import numpy.typing as npt
 
@@ -78,5 +80,4 @@ def dither(signal: FloatArray, mode: DitherMode) -> MaskArray:
         return ordered_dither(signal)
     if mode is DitherMode.FLOYD_STEINBERG:
         return floyd_steinberg(signal)
-    msg = f"unknown dither mode: {mode}"
-    raise ValueError(msg)
+    assert_never(mode)

@@ -1,9 +1,4 @@
-"""Application loop (I/O edge): wires the pure modules together.
-
-capture -> difference -> motion -> gestures -> menu update -> render -> HUD ->
-keys. This module contains no core algorithms, only orchestration, HUD text,
-and key handling.
-"""
+"""Application loop: camera -> difference/flow -> flicks -> menu -> display."""
 
 from __future__ import annotations
 
@@ -15,14 +10,14 @@ import numpy as np
 import numpy.typing as npt
 
 from motioncon.config import DitherMode, Event, Settings
-from motioncon.control.gestures import GestureRecognizer, SizeGrowSelectDetector
+from motioncon.control.flick import FlickDetector
 from motioncon.render.dither import dither
 from motioncon.render.dots import downsample, render_dots
 from motioncon.telemetry.logger import JsonlLogger
 from motioncon.ui.menu import Menu, MenuItem
 from motioncon.vision.camera import Camera
 from motioncon.vision.difference import TrailsAccumulator, boost, frame_difference, to_gray
-from motioncon.vision.motion import MotionAnalyzer, MotionState
+from motioncon.vision.flow import FlowAnalyzer, FlowState
 
 _WINDOW = "motion-console"
 
@@ -47,26 +42,34 @@ _DEMO_MENU = (
 
 _WHITE = (255, 255, 255)
 _BLACK = (0, 0, 0)
-_PURPLE = (255, 80, 220)
+_GRAY = (90, 90, 90)
 
 
 def _draw_hud(
     canvas: npt.NDArray[np.uint8],
     menu: Menu,
-    state: MotionState,
-    recognizer: GestureRecognizer,
+    state: FlowState,
+    detector: FlickDetector,
     last_event: Event | None,
+    last_event_time: float,
+    now: float,
     fps: float,
+    gesture_band: tuple[float, float],
 ) -> npt.NDArray[np.uint8]:
-    """Brutalist overlay: hard borders, inverse selection, status strip."""
+    """Draw menu, gesture band, flow diagnostics, and stroke progress."""
     h, w = canvas.shape[:2]
     font = cv2.FONT_HERSHEY_SIMPLEX
     menu_h = 32 + 36 * len(menu.items)
-    cursor = recognizer.cursor
+
+    band_top = int(gesture_band[0] * h)
+    band_bottom = int(gesture_band[1] * h)
+    cv2.line(canvas, (0, band_top), (w, band_top), _GRAY, 1)
+    cv2.line(canvas, (0, band_bottom), (w, band_bottom), _GRAY, 1)
+    cv2.putText(canvas, "GESTURE BAND", (w - 138, band_top + 16), font, 0.4, _GRAY, 1)
 
     cv2.rectangle(canvas, (8, 8), (280, menu_h), _WHITE, 2)
     if menu.can_go_back:
-        cv2.putText(canvas, "BACK: DOUBLE-SWIPE-LEFT", (16, 30), font, 0.45, _WHITE, 1, cv2.LINE_AA)
+        cv2.putText(canvas, "BACK: SWIPE LEFT", (16, 30), font, 0.45, _WHITE, 1, cv2.LINE_AA)
 
     for i, item in enumerate(menu.items):
         y = 60 + 36 * i
@@ -78,26 +81,31 @@ def _draw_hud(
         else:
             cv2.putText(canvas, label, (20, y), font, 0.65, _WHITE, 2, cv2.LINE_AA)
 
-    if cursor is not None:
-        cx, cy = int(cursor[0] * (w - 1)), int(cursor[1] * (h - 1))
-        arm = 14
-        cv2.line(canvas, (cx - arm, cy), (cx + arm, cy), _PURPLE, 2)
-        cv2.line(canvas, (cx, cy - arm), (cx, cy + arm), _PURPLE, 2)
+    if detector.ready:
+        remaining = detector.arm_remaining_s
+        phase_text = f"READY {remaining:.1f}s" if remaining is not None else "READY"
+    else:
+        phase_text = detector.phase.name
+    flow_text = (
+        f"FLOW {state.magnitude:.2f} | COH {state.coherence:.2f} | "
+        f"ACTIVE {state.active_frac:.3f} | {phase_text}"
+    )
+    cv2.putText(canvas, flow_text, (12, h - 46), font, 0.45, _WHITE, 1, cv2.LINE_AA)
+
+    bar_x, bar_y, bar_w, bar_h = 12, h - 40, 220, 7
+    cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + bar_w, bar_y + bar_h), _GRAY, 1)
+    fill = int(bar_w * detector.progress)
+    if fill > 0:
+        cv2.rectangle(canvas, (bar_x, bar_y), (bar_x + fill, bar_y + bar_h), _WHITE, -1)
 
     strip_h = 28
     cv2.rectangle(canvas, (0, h - strip_h), (w, h), _BLACK, -1)
     cv2.line(canvas, (0, h - strip_h), (w, h - strip_h), _WHITE, 2)
-    lock_txt = f"{state.lock_remaining_s:.1f}S" if state.track_locked else "OFF"
     sel = menu.selected_item.label.upper()
-    travel_txt = ""
-    if recognizer.swipe_travel > 0.0:
-        travel_txt = (
-            f" | TRAVEL {recognizer.swipe_travel:.2f}/{recognizer.swipe_min_travel:.2f}"
-        )
+    visible_event = last_event if now - last_event_time <= 2.0 else None
     status = (
         f"SEL {menu.selected_index + 1}/{len(menu.items)} {sel} | "
-        f"AREA {state.blob_area:.2f} | LOCK {lock_txt}{travel_txt} | "
-        f"EVT {last_event.name if last_event else '-'} | FPS {fps:.0f}"
+        f"EVT {visible_event.name if visible_event else '-'} | FPS {fps:.0f}"
     )
     cv2.putText(canvas, status, (12, h - 8), font, 0.5, _WHITE, 1, cv2.LINE_AA)
     return canvas
@@ -106,42 +114,27 @@ def _draw_hud(
 def run(settings: Settings) -> None:
     """Run the capture/render loop until the user quits."""
     trails = TrailsAccumulator(decay=settings.trails_decay)
-    analyzer = MotionAnalyzer(
-        threshold=settings.motion_threshold,
-        min_energy=settings.min_energy,
-        cell_size=settings.blob_cell_size,
-        window_cells=settings.blob_window_cells,
-        velocity_window=settings.velocity_window,
-        min_track_area=settings.min_track_area,
-        track_search_radius=settings.track_search_radius,
-        track_max_miss_frames=settings.track_max_miss_frames,
-        track_candidates=settings.track_candidates,
-        hand_zone_x=settings.hand_zone_x,
-        keyboard_y=settings.keyboard_y,
-        intent_speed=settings.intent_speed,
-        lock_duration_s=settings.lock_duration_s,
-        max_centroid_step=settings.max_centroid_step,
-        switch_margin=settings.switch_margin,
+    flow = FlowAnalyzer(
+        width=settings.flow_width,
+        height=settings.flow_height,
+        mag_floor=settings.flow_mag_floor,
+        gesture_band=settings.gesture_band,
+        ignore_bottom=settings.ignore_bottom,
     )
-    recognizer = GestureRecognizer(
-        swipe_intent_speed=settings.swipe_intent_speed,
-        swipe_release_factor=settings.swipe_release_factor,
-        swipe_axis_dominance=settings.swipe_axis_dominance,
-        swipe_max_duration_s=settings.swipe_max_duration_s,
-        event_cooldown_s=settings.event_cooldown_s,
-        select_cooldown_s=settings.select_cooldown_s,
-        opposite_lockout_s=settings.opposite_lockout_s,
-        double_swipe_window_s=settings.double_swipe_window_s,
-        cursor_smoothing=settings.cursor_smoothing,
-        min_track_area=settings.min_track_area,
-        swipe_min_travel=settings.swipe_min_travel,
-        select_steady_speed=settings.select_steady_speed,
-        select_detector=SizeGrowSelectDetector(
-            area_growth=settings.select_area_growth,
-            min_area=settings.select_min_area,
-            steady_speed=settings.select_steady_speed,
-            history=settings.select_history,
-        ),
+    detector = FlickDetector(
+        presence_floor=settings.presence_floor,
+        quiet_frac=settings.quiet_frac,
+        settle_s=settings.settle_s,
+        settle_mag=settings.settle_mag,
+        arm_window_s=settings.arm_window_s,
+        coh_min=settings.coh_min,
+        coherence_collapse=settings.coherence_collapse,
+        flick_mag=settings.flick_mag,
+        axis_dominance=settings.axis_dominance,
+        impulse_thresh=settings.impulse_thresh,
+        stroke_max_s=settings.stroke_max_s,
+        refractory_s=settings.refractory_s,
+        opp_lockout_s=settings.opp_lockout_s,
     )
     menu = Menu(_DEMO_MENU)
     dither_mode = settings.dither_mode
@@ -149,6 +142,7 @@ def run(settings: Settings) -> None:
 
     prev = None
     last_event: Event | None = None
+    last_event_time = float("-inf")
     fps = 0.0
     last_time = time.perf_counter()
     frame_counter = 0
@@ -172,6 +166,7 @@ def run(settings: Settings) -> None:
             fps = 0.9 * fps + 0.1 * (1.0 / dt) if dt > 0 else fps
 
             gray = to_gray(frame)
+            state = flow.analyze(gray, timestamp=now)
             if prev is None:
                 prev = gray
                 continue
@@ -179,44 +174,31 @@ def run(settings: Settings) -> None:
             prev = gray
 
             trail_signal = trails.update(diff)
-            state = analyzer.analyze(diff, timestamp=now)
 
-            for event in recognizer.update(state):
+            for event in detector.update(state):
                 last_event = event
-                action = menu.handle_event(event)
+                last_event_time = now
+                menu.handle_event(event)
                 if settings.telemetry_enabled:
                     log.log(
                         "gesture",
                         event=event.name,
-                        cursor=recognizer.cursor,
                         menu_index=menu.selected_index,
                         menu_item=menu.selected_item.label,
-                        flush=True,
                     )
-                    if action is not None:
-                        log.log(
-                            "selection",
-                            action=action,
-                            menu_index=menu.selected_index,
-                            flush=True,
-                        )
             if settings.telemetry_enabled:
                 frame_counter += 1
                 if frame_counter % settings.telemetry_frame_stride == 0:
                     log.log(
-                        "frame",
-                        energy=state.energy,
-                        blob_area=state.blob_area,
-                        centroid=state.centroid,
-                        track_locked=state.track_locked,
-                        lock_remaining_s=round(state.lock_remaining_s, 2),
-                        top_score=round(state.top_score, 3),
+                        "flow",
+                        mean_flow=[round(value, 4) for value in state.mean_flow],
+                        magnitude=round(state.magnitude, 4),
+                        coherence=round(state.coherence, 4),
+                        active_frac=round(state.active_frac, 4),
+                        phase=detector.phase.name,
+                        impulse=round(detector.impulse, 4),
+                        sample_timestamp=state.timestamp,
                         fps=round(fps, 2),
-                        cursor=recognizer.cursor,
-                        cursor_speed=round(recognizer.cursor_speed, 3)
-                        if recognizer.cursor_speed is not None
-                        else None,
-                        swipe_travel=round(recognizer.swipe_travel, 3),
                     )
 
             grid = downsample(boost(trail_signal, settings.signal_gain), settings.cell_size)
@@ -229,8 +211,18 @@ def run(settings: Settings) -> None:
                 background=scheme.background,
                 brightness=grid,
             )
-            display = cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR)
-            display = _draw_hud(display, menu, state, recognizer, last_event, fps)
+            display = np.asarray(cv2.cvtColor(canvas, cv2.COLOR_RGB2BGR), dtype=np.uint8)
+            display = _draw_hud(
+                display,
+                menu,
+                state,
+                detector,
+                last_event,
+                last_event_time,
+                now,
+                fps,
+                settings.gesture_band,
+            )
             cv2.imshow(_WINDOW, display)
 
             key = cv2.waitKey(1) & 0xFF

@@ -1,20 +1,17 @@
 # motion-console
 
 A real-time, motion-controlled interface. The webcam renders only what **moves** as a
-field of dither dots (frame differencing), so a moving hand becomes the only visible
-object — and the UI is navigated purely through motion: deliberate swipes step the
-menu, and pushing a hand toward the camera (blob grows) selects.
+field of dither dots, while dense optical flow detects short, coherent hand flicks.
 
 ## How it works
 
-Each frame is differenced against the previous one; the difference signal feeds two
-independent consumers:
+Each camera frame feeds two independent paths:
 
 - **Visualization** — the signal is accumulated into decaying trails, dithered
   (Bayer or Floyd–Steinberg) into a binary mask, and rasterized as colored dots.
-- **Control** — the dominant moving blob's centroid, energy, area, and velocity become a
-  `MotionState`; a debounced state machine turns that stream into discrete gesture
-  events that drive a menu.
+- **Control** — dense Farnebäck flow is summarized as global direction, coherence, and
+  active area inside a horizontal gesture band. A presence-gated state machine suppresses
+  the hand raise, waits for a settle, then recognizes one directional burst.
 
 See [docs/architecture.md](docs/architecture.md) for the module map and design rules.
 
@@ -37,15 +34,35 @@ uv run motioncon --camera 1 # pick a device index
 
 | Input | Effect |
 | --- | --- |
-| Move hand (left/right zones) | Purple cursor tracks your hand; spatial lock keeps it on target |
-| Swipe left / right / up / down | Step the menu once you travel **33% of the screen** along that axis (speed does not matter) |
-| Double swipe left | Back (pop one menu level) |
-| Push hand toward camera (hold still) | Select when the motion blob grows in size |
+| Raise hand into the band, settle, flick up | Previous menu item |
+| Raise hand into the band, settle, flick down | Next menu item |
+| Raise hand into the band, settle, swipe left | Back |
 | `d` key | Toggle dither algorithm (Bayer / Floyd–Steinberg) |
 | `q` or `Esc` | Quit |
 
-The HUD shows the selected menu item, blob area, lock timer, swipe travel progress (`TRAVEL 0.21/0.33`), last gesture, and FPS.
-Gestures are always logged to `telemetry.jsonl`; frame metrics are logged every 3rd frame to keep FPS up.
+The camera is expected to point above the keyboard. Only normalized rows `0.25..0.85`
+feed control; the bottom 15% and the face/head region above the band are ignored.
+The HUD shows the band, detector phase, flow coherence/magnitude, impulse progress,
+last gesture, and FPS. Flow metrics are logged every third frame.
+
+## Reliability harness
+
+Record 2–5 second clips under the supported gesture and distractor labels:
+
+```bash
+uv run python tools/record_clips.py raise_settle_flick_up --duration 3
+uv run python tools/record_clips.py typing --duration 5
+```
+
+Replay all clips, print precision/recall, distractor false-positive rates and latency,
+and optionally store a regression baseline:
+
+```bash
+uv run python tools/eval_detector.py
+uv run python tools/eval_detector.py --write-baseline
+```
+
+Clip videos and per-frame timestamp sidecars live under `data/clips/<label>/`.
 
 ## Development
 
