@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 import time
+from pathlib import Path
 
 import cv2
 import numpy as np
@@ -52,13 +54,63 @@ def _make_detector(settings: Settings) -> FlickDetector:
         quiet_frac=settings.quiet_frac,
         settle_s=settings.settle_s,
         settle_mag=settings.settle_mag,
+        settle_quiet_frac=settings.settle_quiet_frac,
         arm_window_s=settings.arm_window_s,
         capture_floor=settings.capture_floor,
+        reentry_mag=settings.reentry_mag,
         burst_quiet_s=settings.burst_quiet_s,
         burst_max_s=settings.burst_max_s,
         throw_impulse=settings.throw_impulse,
         coh_min=settings.coh_min,
         refractory_s=settings.refractory_s,
+    )
+
+
+def _git_commit_hash() -> str | None:
+    """Return the current git commit hash, or None if unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+            cwd=Path(__file__).resolve().parents[2],
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    commit = result.stdout.strip()
+    return commit or None
+
+
+def _log_config(log: JsonlLogger, settings: Settings) -> None:
+    """Write one kind=config record with every arming/capture threshold."""
+    reentry = settings.capture_floor if settings.reentry_mag is None else settings.reentry_mag
+    log.log(
+        "config",
+        flush=True,
+        git_commit=_git_commit_hash(),
+        settle_s=settings.settle_s,
+        settle_mag=settings.settle_mag,
+        settle_quiet_frac=settings.settle_quiet_frac,
+        presence_floor=settings.presence_floor,
+        quiet_frac=settings.quiet_frac,
+        arm_window_s=settings.arm_window_s,
+        capture_floor=settings.capture_floor,
+        reentry_mag=reentry,
+        burst_quiet_s=settings.burst_quiet_s,
+        burst_max_s=settings.burst_max_s,
+        throw_impulse=settings.throw_impulse,
+        coh_min=settings.coh_min,
+        refractory_s=settings.refractory_s,
+        gesture_band=list(settings.gesture_band),
+        ignore_bottom=settings.ignore_bottom,
+        flow_mag_floor=settings.flow_mag_floor,
+        flow_width=settings.flow_width,
+        flow_height=settings.flow_height,
+        telemetry_frame_stride=settings.telemetry_frame_stride,
     )
 
 
@@ -198,6 +250,10 @@ def run(settings: Settings) -> None:
         ) as camera,
         JsonlLogger(settings.telemetry_path) as log,
     ):
+        print(f"telemetry: {log.path}", flush=True)
+        if settings.telemetry_enabled:
+            _log_config(log, settings)
+
         while True:
             frame = camera.read()
             if frame is None:

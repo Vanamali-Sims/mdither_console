@@ -15,25 +15,32 @@ class JsonlLogger:
 
     Every gesture, selection, and frame metric goes through here so the later
     analysis phase has raw data to work with. The clock is injectable for
-    deterministic tests. Disk flush is batched to avoid per-frame sync cost.
+    deterministic tests. Records flush every write by default so short sessions
+    and hard kills still leave telemetry on disk.
     """
 
     def __init__(
         self,
         path: str | Path,
         clock: Callable[[], float] = time.time,
-        flush_every: int = 30,
+        flush_every: int = 1,
     ) -> None:
-        self._path = Path(path)
+        self._path = Path(path).expanduser().resolve()
         self._clock = clock
         self._flush_every = max(flush_every, 1)
         self._since_flush = 0
         self._file: TextIO | None = None
 
+    @property
+    def path(self) -> Path:
+        """Absolute path of the telemetry file."""
+        return self._path
+
     def open(self) -> None:
         """Open the target file for appending, creating parent dirs if needed."""
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        self._file = self._path.open("a", encoding="utf-8")
+        # Line-buffered so each record reaches the OS promptly.
+        self._file = self._path.open("a", encoding="utf-8", buffering=1)
 
     def log(self, kind: str, *, flush: bool = False, **data: Any) -> None:
         """Append one record: ``{"ts": ..., "kind": ..., **data}``."""

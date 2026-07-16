@@ -25,8 +25,10 @@ class TestSettings:
         assert 0.0 < s.quiet_frac < 1.0
         assert s.settle_s > 0.0
         assert s.settle_mag > 0.0
+        assert 0.0 < s.settle_quiet_frac <= 1.0
         assert s.arm_window_s > 0.0
-        assert 0.0 < s.capture_floor
+        assert s.capture_floor > 0.0
+        assert s.reentry_mag is None or s.reentry_mag > 0.0
         assert s.burst_quiet_s > 0.0
         assert s.burst_max_s > s.burst_quiet_s
         assert s.throw_impulse > 0.0

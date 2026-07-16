@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Protocol
@@ -70,14 +71,17 @@ class _CaptureSample:
 
 _ZERO_EPS = 1e-12
 _MAX_DEAD_IN_SEGMENT = 2
+_REENTRY_FRAMES = 2
 
 
 class FlickDetector:
     """Arm with burst→quiet, then capture→classify horizontal throws.
 
-    Presence is not required while settling or armed. Capture keeps dead frames
-    mid-burst (flow blink is normal). Classification ignores vertical motion and
-    fires the first time-ordered segment that clears the throw threshold.
+    Presence is not required while settling or armed. Settling uses a rolling
+    quiet-fraction window so single tremor blips do not reset the timer.
+    Capture keeps dead frames mid-burst (flow blink is normal). Classification
+    ignores vertical motion and fires the first time-ordered segment that clears
+    the throw threshold.
     """
 
     def __init__(
@@ -87,8 +91,10 @@ class FlickDetector:
         quiet_frac: float = 0.02,
         settle_s: float = 0.25,
         settle_mag: float = 0.35,
+        settle_quiet_frac: float = 0.75,
         arm_window_s: float = 3.0,
         capture_floor: float = 0.15,
+        reentry_mag: float | None = None,
         burst_quiet_s: float = 0.20,
         burst_max_s: float = 1.0,
         throw_impulse: float = 0.05,
@@ -99,8 +105,10 @@ class FlickDetector:
         self._quiet_frac = quiet_frac
         self._settle_s = settle_s
         self._settle_mag = settle_mag
+        self._settle_quiet_frac = settle_quiet_frac
         self._arm_window_s = arm_window_s
         self._capture_floor = capture_floor
+        self._reentry_mag = capture_floor if reentry_mag is None else reentry_mag
         self._burst_quiet_s = burst_quiet_s
         self._burst_max_s = burst_max_s
         self._throw_impulse = throw_impulse
@@ -108,7 +116,8 @@ class FlickDetector:
         self._refractory_s = refractory_s
 
         self._phase = FlickPhase.EMPTY
-        self._settle_since: float | None = None
+        self._settle_window: deque[tuple[float, bool]] = deque()
+        self._reentry_run = 0
         self._armed_since: float | None = None
         self._last_t = 0.0
         self._fired_at = float("-inf")
@@ -175,7 +184,7 @@ class FlickDetector:
         """Consume one sample and return at most one directional event."""
         self._last_t = sample.timestamp
         magnitude = _magnitude(sample.mean_flow)
-        quiet = self._is_arm_quiet(sample.active_frac, magnitude)
+        quiet = self._is_settle_quiet(magnitude)
 
         if self._phase is FlickPhase.EMPTY:
             if sample.active_frac >= self._presence_floor:
@@ -185,26 +194,24 @@ class FlickDetector:
         if self._phase is FlickPhase.FIRED:
             if sample.timestamp - self._fired_at < self._refractory_s:
                 return []
-            self._restart_settle(sample.timestamp, quiet)
+            self._restart_settle(sample.timestamp, quiet, magnitude)
             return []
 
         if self._phase is FlickPhase.ENTRY:
             if quiet:
                 self._phase = FlickPhase.SETTLE
-                self._settle_since = sample.timestamp
+                self._begin_settle(sample.timestamp, quiet)
             return []
 
         if self._phase is FlickPhase.SETTLE:
-            if not quiet:
+            if self._note_reentry(magnitude):
                 self._phase = FlickPhase.ENTRY
-                self._settle_since = None
+                self._clear_settle()
                 return []
-            if self._settle_since is None:
-                self._settle_since = sample.timestamp
-            if sample.timestamp - self._settle_since >= self._settle_s:
+            if self._note_settle_sample(sample.timestamp, quiet):
                 self._phase = FlickPhase.ARMED
                 self._armed_since = sample.timestamp
-                self._settle_since = None
+                self._clear_settle()
             return []
 
         if self._phase is FlickPhase.ARMED:
@@ -216,13 +223,44 @@ class FlickDetector:
                 self._open_capture(sample, magnitude)
             return []
 
-        if self._phase is FlickPhase.CAPTURE:
-            return self._continue_capture(sample, magnitude)
+        assert self._phase is FlickPhase.CAPTURE
+        return self._continue_capture(sample, magnitude)
 
-        return []
+    def _is_settle_quiet(self, magnitude: float) -> bool:
+        return magnitude < self._settle_mag
 
-    def _is_arm_quiet(self, active_frac: float, magnitude: float) -> bool:
-        return active_frac < self._quiet_frac and magnitude < self._settle_mag
+    def _begin_settle(self, timestamp: float, quiet: bool) -> None:
+        self._settle_window.clear()
+        self._reentry_run = 0
+        self._settle_window.append((timestamp, quiet))
+
+    def _clear_settle(self) -> None:
+        self._settle_window.clear()
+        self._reentry_run = 0
+
+    def _note_reentry(self, magnitude: float) -> bool:
+        """Return True when sustained motion should demote SETTLE → ENTRY."""
+        if magnitude >= self._reentry_mag:
+            self._reentry_run += 1
+        else:
+            self._reentry_run = 0
+        return self._reentry_run >= _REENTRY_FRAMES
+
+    def _note_settle_sample(self, timestamp: float, quiet: bool) -> bool:
+        """Append one settle sample; return True when the rolling window arms."""
+        self._settle_window.append((timestamp, quiet))
+        # Keep a rolling window of about settle_s without shrinking span below it.
+        while (
+            len(self._settle_window) >= 2
+            and self._settle_window[-1][0] - self._settle_window[1][0] >= self._settle_s
+        ):
+            self._settle_window.popleft()
+
+        span = self._settle_window[-1][0] - self._settle_window[0][0]
+        if span < self._settle_s:
+            return False
+        quiet_count = sum(1 for _, is_quiet in self._settle_window if is_quiet)
+        return quiet_count / len(self._settle_window) >= self._settle_quiet_frac
 
     def _open_capture(self, sample: DirectionSample, magnitude: float) -> None:
         self._phase = FlickPhase.CAPTURE
@@ -295,19 +333,21 @@ class FlickDetector:
             self._to_empty()
         return []
 
-    def _restart_settle(self, timestamp: float, quiet: bool) -> None:
+    def _restart_settle(self, timestamp: float, quiet: bool, magnitude: float) -> None:
         self._clear_capture()
         self._armed_since = None
         if quiet:
             self._phase = FlickPhase.SETTLE
-            self._settle_since = timestamp
+            self._begin_settle(timestamp, quiet)
+            # A loud first sample after refractory still counts toward reentry.
+            self._note_reentry(magnitude)
         else:
             self._phase = FlickPhase.ENTRY
-            self._settle_since = None
+            self._clear_settle()
 
     def _to_empty(self) -> None:
         self._phase = FlickPhase.EMPTY
-        self._settle_since = None
+        self._clear_settle()
         self._armed_since = None
         self._clear_capture()
 
@@ -404,10 +444,7 @@ def _integrate_segment(samples: list[_CaptureSample]) -> BurstSegment:
     coh_sum = 0.0
     for index, sample in enumerate(samples):
         if index == 0:
-            if len(samples) >= 2:
-                dt = samples[1].timestamp - sample.timestamp
-            else:
-                dt = 1.0 / 15.0
+            dt = samples[1].timestamp - sample.timestamp if len(samples) >= 2 else 1.0 / 15.0
         else:
             dt = sample.timestamp - samples[index - 1].timestamp
         dt = max(dt, 0.0)

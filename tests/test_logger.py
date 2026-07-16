@@ -18,6 +18,7 @@ class TestJsonlLogger:
     def test_writes_timestamped_records(self, tmp_path: Path) -> None:
         path = tmp_path / "events.jsonl"
         with JsonlLogger(path, clock=fixed_clock) as log:
+            assert log.path == path.resolve()
             log.log("gesture", event="STROKE_LEFT", cursor=[0.4, 0.6])
             log.log("frame", energy=0.02, fps=30.1)
 
@@ -33,6 +34,15 @@ class TestJsonlLogger:
         second = json.loads(lines[1])
         assert second["kind"] == "frame"
         assert second["energy"] == 0.02
+
+    def test_flush_every_makes_records_visible_immediately(self, tmp_path: Path) -> None:
+        path = tmp_path / "events.jsonl"
+        with JsonlLogger(path, clock=fixed_clock, flush_every=1) as log:
+            log.log("config", settle_s=0.25)
+            assert path.read_text(encoding="utf-8").strip()
+            record = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+            assert record["kind"] == "config"
+            assert record["settle_s"] == 0.25
 
     def test_appends_across_sessions(self, tmp_path: Path) -> None:
         path = tmp_path / "events.jsonl"

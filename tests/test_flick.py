@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from motioncon.config import Event
 from motioncon.control.flick import FlickDetector, FlickPhase
 from motioncon.vision.flow import FlowState
@@ -28,8 +30,10 @@ def detector(**overrides: float) -> FlickDetector:
         "quiet_frac": 0.02,
         "settle_s": 0.20,
         "settle_mag": 0.30,
+        "settle_quiet_frac": 0.75,
         "arm_window_s": 3.0,
         "capture_floor": 0.15,
+        "reentry_mag": 0.15,
         "burst_quiet_s": 0.20,
         "burst_max_s": 1.0,
         "throw_impulse": 0.05,
@@ -46,7 +50,7 @@ def arm(d: FlickDetector, start: float = 0.0) -> float:
     assert d.update(quiet(start + 0.05)) == []
     assert d.update(quiet(start + 0.15)) == []
     assert d.update(quiet(start + 0.26)) == []
-    assert d.phase is FlickPhase.ARMED
+    assert phase_of(d) is FlickPhase.ARMED
     return start + 0.26
 
 
@@ -55,6 +59,11 @@ def run(d: FlickDetector, states: list[FlowState]) -> list[Event]:
     for state in states:
         events.extend(d.update(state))
     return events
+
+
+def phase_of(d: FlickDetector) -> FlickPhase:
+    """Read phase without letting mypy narrow across mutating update() calls."""
+    return d.phase
 
 
 def close_burst(start: float, *, step: float = 0.05, seconds: float = 0.25) -> list[FlowState]:
@@ -145,7 +154,7 @@ def test_slow_ambiguous_drift_fires_nothing() -> None:
     burst = d.take_burst()
     assert burst is not None
     assert burst.outcome == "none"
-    assert d.phase is FlickPhase.ARMED
+    assert phase_of(d) is FlickPhase.ARMED
 
 
 def test_two_separate_bursts_classify_independently() -> None:
@@ -159,7 +168,7 @@ def test_two_separate_bursts_classify_independently() -> None:
         *close_burst(t0 + 0.25),
     ]
     assert run(d, first) == [Event.STROKE_RIGHT]
-    assert d.phase is FlickPhase.FIRED
+    assert phase_of(d) is FlickPhase.FIRED
     d.take_burst()
 
     # Refractory, then re-arm with a fresh burst→quiet latch.
@@ -169,7 +178,7 @@ def test_two_separate_bursts_classify_independently() -> None:
     # Raise then settle to re-arm.
     assert d.update(sample(t_ref + 0.25, (1.0, 0.0), coherence=0.8, active=0.12)) == []
     assert run(d, close_burst(t_ref + 0.30, seconds=0.30)) == []
-    assert d.phase is FlickPhase.ARMED
+    assert phase_of(d) is FlickPhase.ARMED
 
     t1 = t_ref + 0.65
     second = [
@@ -187,16 +196,54 @@ def test_arm_window_expires_without_capture() -> None:
     arm(d)
     assert d.arm_remaining_s is not None
     assert run(d, [quiet(0.40), quiet(0.70), quiet(0.80)]) == []
-    assert d.phase is FlickPhase.EMPTY
+    assert phase_of(d) is FlickPhase.EMPTY
 
 
 def test_continuous_motion_without_quiet_never_arms() -> None:
     d = detector()
-    states = [
-        sample(i * 0.05, (1.2, 0.0), coherence=0.9, active=0.15) for i in range(40)
-    ]
+    states = [sample(i * 0.05, (1.2, 0.0), coherence=0.9, active=0.15) for i in range(40)]
     assert run(d, states) == []
-    assert d.phase is FlickPhase.ENTRY
+    assert phase_of(d) is FlickPhase.ENTRY
+
+
+def test_rolling_settle_tolerates_single_frame_blips() -> None:
+    """Quiet stream with a blip every 3rd frame still reaches ARMED within ~0.5s."""
+    d = detector(settle_s=0.25, settle_mag=0.30, settle_quiet_frac=0.75, reentry_mag=0.15)
+    assert d.update(sample(0.0, (0.0, -1.5), coherence=0.9, active=0.10)) == []
+    assert phase_of(d) is FlickPhase.ENTRY
+
+    dt = 1.0 / 15.0
+    armed_at: float | None = None
+    for i in range(1, 12):  # ~0.73s of samples after entry
+        t = i * dt
+        # Single-frame tremor blip above settle_mag; must not reset settle.
+        frame = sample(t, (0.55, 0.0), coherence=0.6, active=0.01) if i % 3 == 0 else quiet(t)
+        assert d.update(frame) == []
+        if phase_of(d) is FlickPhase.ARMED:
+            armed_at = t
+            break
+
+    assert armed_at is not None
+    assert armed_at <= 0.5 + 1e-9
+    assert phase_of(d) is FlickPhase.ARMED
+
+
+def test_sustained_motion_during_settle_demotes_to_entry() -> None:
+    """SETTLE → ENTRY only after sustained motion (2+ frames at reentry_mag)."""
+    d = detector(settle_s=0.25, settle_mag=0.30, reentry_mag=0.15)
+    assert d.update(sample(0.0, (0.0, -1.5), coherence=0.9, active=0.10)) == []
+    assert d.update(quiet(0.05)) == []
+    assert phase_of(d) is FlickPhase.SETTLE
+
+    # One noisy frame must not demote.
+    assert d.update(sample(0.10, (0.8, 0.0), coherence=0.7, active=0.05)) == []
+    assert phase_of(d) is FlickPhase.SETTLE
+
+    # Sustained motion (≥2 frames) falls back to ENTRY.
+    assert d.update(sample(0.15, (0.8, 0.0), coherence=0.7, active=0.05)) == []
+    assert phase_of(d) is FlickPhase.ENTRY
+    assert d.update(sample(0.20, (0.8, 0.0), coherence=0.7, active=0.05)) == []
+    assert phase_of(d) is FlickPhase.ENTRY
 
 
 def test_clean_left_throw_fires_once() -> None:
@@ -213,13 +260,50 @@ def test_clean_left_throw_fires_once() -> None:
     assert run(d, states) == [Event.STROKE_LEFT]
 
 
+def test_left_right_throw_symmetry() -> None:
+    """REGRESSION: mirrored horizontal throws must produce mirrored events."""
+    motion = [
+        (2.0, 0.4),
+        (2.0, 0.3),
+        (2.0, 0.2),
+        (2.0, 0.1),
+        (2.0, 0.0),
+    ]
+
+    def throw_stream(start: float, sign: float) -> list[FlowState]:
+        return [
+            *[
+                sample(start + 0.05 * (i + 1), (sign * mx, my), coherence=0.85, active=0.12)
+                for i, (mx, my) in enumerate(motion)
+            ],
+            *close_burst(start + 0.05 * (len(motion) + 1)),
+        ]
+
+    left_d = detector()
+    right_d = detector()
+    t_left = arm(left_d)
+    t_right = arm(right_d)
+
+    assert run(left_d, throw_stream(t_left, -1.0)) == [Event.STROKE_LEFT]
+    assert run(right_d, throw_stream(t_right, 1.0)) == [Event.STROKE_RIGHT]
+
+    left_burst = left_d.take_burst()
+    right_burst = right_d.take_burst()
+    assert left_burst is not None and right_burst is not None
+    assert left_burst.outcome == Event.STROKE_LEFT.name
+    assert right_burst.outcome == Event.STROKE_RIGHT.name
+    assert len(left_burst.segments) == len(right_burst.segments)
+    for left_seg, right_seg in zip(left_burst.segments, right_burst.segments, strict=True):
+        assert left_seg.sign == -right_seg.sign
+        assert abs(left_seg.integral + right_seg.integral) < 1e-9
+
+
 def test_capture_balance_updates_during_throw() -> None:
     d = detector()
     t0 = arm(d)
     assert d.capture_balance is None
     assert d.update(sample(t0 + 0.05, (2.0, 0.0), coherence=0.9, active=0.12)) == []
-    assert d.phase is FlickPhase.CAPTURE
-    balance = d.capture_balance
-    assert balance is not None
+    assert phase_of(d) is FlickPhase.CAPTURE
+    balance = cast(tuple[float, float], d.capture_balance)
     left, right = balance
     assert right > left

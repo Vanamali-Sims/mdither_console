@@ -76,10 +76,12 @@ class Settings:
     quiet_frac: float = 0.02
     settle_s: float = 0.25
     settle_mag: float = 0.35
+    settle_quiet_frac: float = 0.75
     arm_window_s: float = 3.0
 
     # Capture→classify horizontal strokes
     capture_floor: float = 0.15
+    reentry_mag: float | None = None  # default: same as capture_floor
     burst_quiet_s: float = 0.20
     burst_max_s: float = 1.0
     throw_impulse: float = 0.05
