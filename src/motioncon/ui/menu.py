@@ -30,8 +30,8 @@ class _Level:
 class Menu:
     """A list of items, a selection index, and a back-stack.
 
-    Vertical flicks step the selection with wrap-around. A left swipe pops back
-    one level. Selection is deliberately outside the v1 gesture vocabulary.
+    Horizontal strokes step the selection with wrap-around. Back is unbound in
+    the v1 gesture vocabulary; use ``back()`` from a keyboard fallback.
     """
 
     def __init__(self, items: tuple[MenuItem, ...] | list[MenuItem]) -> None:
@@ -69,12 +69,10 @@ class Menu:
     def handle_event(self, event: Event) -> str | None:
         """Apply one gesture event."""
         level = self._stack[-1]
-        if event is Event.FLICK_UP:
+        if event is Event.STROKE_RIGHT:
             level.index = (level.index - 1) % len(level.items)
-        elif event is Event.FLICK_DOWN:
+        elif event is Event.STROKE_LEFT:
             level.index = (level.index + 1) % len(level.items)
-        elif event is Event.SWIPE_LEFT:
-            self.back()
         return None
 
     def back(self) -> bool:

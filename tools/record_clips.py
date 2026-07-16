@@ -14,9 +14,8 @@ from motioncon.config import Settings
 from motioncon.vision.camera import Camera
 
 GESTURE_LABELS = (
-    "raise_settle_flick_up",
-    "raise_settle_flick_down",
-    "raise_settle_swipe_left",
+    "stroke_left",
+    "stroke_right",
 )
 DISTRACTOR_LABELS = (
     "typing",

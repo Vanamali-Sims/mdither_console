@@ -41,9 +41,8 @@ class ColorScheme(Enum):
 class Event(Enum):
     """Discrete gesture events emitted by the control layer."""
 
-    FLICK_UP = auto()
-    FLICK_DOWN = auto()
-    SWIPE_LEFT = auto()
+    STROKE_LEFT = auto()
+    STROKE_RIGHT = auto()
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,20 +71,20 @@ class Settings:
     ignore_bottom: float = 0.15
     gesture_band: tuple[float, float] = (0.25, 0.85)
 
-    # Burst→quiet directional gestures
+    # Burst→quiet arming
     presence_floor: float = 0.015
     quiet_frac: float = 0.02
     settle_s: float = 0.25
     settle_mag: float = 0.35
     arm_window_s: float = 3.0
-    coh_min: float = 0.60
-    coherence_collapse: float = 0.35
-    flick_mag: float = 0.75
-    axis_dominance: float = 1.8
-    impulse_thresh: float = 3.0
-    stroke_max_s: float = 0.50
+
+    # Capture→classify horizontal strokes
+    capture_floor: float = 0.15
+    burst_quiet_s: float = 0.20
+    burst_max_s: float = 1.0
+    throw_impulse: float = 0.05
+    coh_min: float = 0.50
     refractory_s: float = 0.40
-    opp_lockout_s: float = 0.70
 
     # Rendering
     dither_mode: DitherMode = DitherMode.BAYER

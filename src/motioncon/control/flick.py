@@ -1,8 +1,9 @@
-"""Pure burst→quiet recognition of coherent directional-flow bursts."""
+"""Burst→quiet arming with capture→classify horizontal stroke detection."""
 
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Protocol
 
@@ -32,23 +33,51 @@ class FlickPhase(Enum):
     ENTRY = auto()
     SETTLE = auto()
     ARMED = auto()
-    STROKE = auto()
+    CAPTURE = auto()
     FIRED = auto()
 
 
-_EVENTS = {
-    ("x", -1): Event.SWIPE_LEFT,
-    ("y", -1): Event.FLICK_UP,
-    ("y", 1): Event.FLICK_DOWN,
-}
+@dataclass(frozen=True, slots=True)
+class BurstSegment:
+    """One consistent-sign run inside a captured burst."""
+
+    sign: int
+    integral: float
+    duration: float
+    mean_coherence: float
+
+
+@dataclass(frozen=True, slots=True)
+class BurstReport:
+    """Finished burst ready for telemetry / offline tuning."""
+
+    start_ts: float
+    end_ts: float
+    n_samples: int
+    segments: tuple[BurstSegment, ...]
+    outcome: str
+    y_integral: float
+
+
+@dataclass(frozen=True, slots=True)
+class _CaptureSample:
+    timestamp: float
+    mean_flow: tuple[float, float]
+    coherence: float
+    active_frac: float
+    magnitude: float
+
+
+_ZERO_EPS = 1e-12
+_MAX_DEAD_IN_SEGMENT = 2
 
 
 class FlickDetector:
-    """State machine mapping direction samples to the three supported events.
+    """Arm with burst→quiet, then capture→classify horizontal throws.
 
-    Arming is a burst→quiet latch: activity in the gesture band enters ENTRY,
-    then a quiet gap settles into ARMED for ``arm_window_s``. Presence is not
-    required while settling or armed — stillness produces zero optical flow.
+    Presence is not required while settling or armed. Capture keeps dead frames
+    mid-burst (flow blink is normal). Classification ignores vertical motion and
+    fires the first time-ordered segment that clears the throw threshold.
     """
 
     def __init__(
@@ -59,41 +88,40 @@ class FlickDetector:
         settle_s: float = 0.25,
         settle_mag: float = 0.35,
         arm_window_s: float = 3.0,
-        coh_min: float = 0.60,
-        coherence_collapse: float = 0.35,
-        flick_mag: float = 0.75,
-        axis_dominance: float = 1.8,
-        impulse_thresh: float = 3.0,
-        stroke_max_s: float = 0.50,
+        capture_floor: float = 0.15,
+        burst_quiet_s: float = 0.20,
+        burst_max_s: float = 1.0,
+        throw_impulse: float = 0.05,
+        coh_min: float = 0.50,
         refractory_s: float = 0.40,
-        opp_lockout_s: float = 0.70,
     ) -> None:
         self._presence_floor = presence_floor
         self._quiet_frac = quiet_frac
         self._settle_s = settle_s
         self._settle_mag = settle_mag
         self._arm_window_s = arm_window_s
+        self._capture_floor = capture_floor
+        self._burst_quiet_s = burst_quiet_s
+        self._burst_max_s = burst_max_s
+        self._throw_impulse = throw_impulse
         self._coh_min = coh_min
-        self._coherence_collapse = coherence_collapse
-        self._flick_mag = flick_mag
-        self._axis_dominance = axis_dominance
-        self._impulse_thresh = impulse_thresh
-        self._stroke_max_s = stroke_max_s
         self._refractory_s = refractory_s
-        self._opp_lockout_s = opp_lockout_s
 
         self._phase = FlickPhase.EMPTY
         self._settle_since: float | None = None
         self._armed_since: float | None = None
         self._last_t = 0.0
-        self._stroke_since = 0.0
-        self._stroke_axis: str | None = None
-        self._stroke_sign = 0
-        self._impulse = 0.0
         self._fired_at = float("-inf")
-        self._last_axis: str | None = None
-        self._last_sign = 0
-        self._last_event_at = float("-inf")
+
+        self._buffer: list[_CaptureSample] = []
+        self._capture_started: float | None = None
+        self._quiet_since: float | None = None
+        self._left_energy = 0.0
+        self._right_energy = 0.0
+
+        self._pending_burst: BurstReport | None = None
+        self._feedback: str | None = None
+        self._feedback_at = float("-inf")
 
     @property
     def phase(self) -> FlickPhase:
@@ -102,8 +130,13 @@ class FlickDetector:
 
     @property
     def ready(self) -> bool:
-        """Whether the detector is armed for a stroke."""
+        """Whether the detector is armed and waiting to open a capture."""
         return self._phase is FlickPhase.ARMED
+
+    @property
+    def capturing(self) -> bool:
+        """Whether a burst buffer is currently open."""
+        return self._phase is FlickPhase.CAPTURE
 
     @property
     def arm_remaining_s(self) -> float | None:
@@ -113,20 +146,36 @@ class FlickDetector:
         return max(0.0, self._arm_window_s - (self._last_t - self._armed_since))
 
     @property
-    def impulse(self) -> float:
-        """Signed accumulated flow along the locked stroke axis."""
-        return self._impulse
+    def capture_balance(self) -> tuple[float, float] | None:
+        """``(left_frac, right_frac)`` of accumulated ``|sx|``, or ``None``."""
+        if self._phase is not FlickPhase.CAPTURE:
+            return None
+        total = self._left_energy + self._right_energy
+        if total <= _ZERO_EPS:
+            return (0.5, 0.5)
+        return (self._left_energy / total, self._right_energy / total)
 
     @property
-    def progress(self) -> float:
-        """Stroke completion fraction, clamped to ``[0, 1]``."""
-        return min(abs(self._impulse) / self._impulse_thresh, 1.0)
+    def feedback(self) -> str | None:
+        """Last classify label: ``STROKE_LEFT``, ``STROKE_RIGHT``, or ``?``."""
+        return self._feedback
+
+    @property
+    def feedback_at(self) -> float:
+        """Timestamp when classify feedback was last set."""
+        return self._feedback_at
+
+    def take_burst(self) -> BurstReport | None:
+        """Return and clear the latest finished burst report, if any."""
+        report = self._pending_burst
+        self._pending_burst = None
+        return report
 
     def update(self, sample: DirectionSample) -> list[Event]:
         """Consume one sample and return at most one directional event."""
         self._last_t = sample.timestamp
         magnitude = _magnitude(sample.mean_flow)
-        quiet = self._is_quiet(sample.active_frac, magnitude)
+        quiet = self._is_arm_quiet(sample.active_frac, magnitude)
 
         if self._phase is FlickPhase.EMPTY:
             if sample.active_frac >= self._presence_floor:
@@ -163,82 +212,91 @@ class FlickDetector:
             if sample.timestamp - self._armed_since >= self._arm_window_s:
                 self._to_empty()
                 return []
-            axis_sign = self._stroke_candidate(sample, magnitude)
-            if axis_sign is None:
-                return []
-            axis, sign = axis_sign
-            if self._opposite_is_locked(axis, sign, sample.timestamp):
-                self._phase = FlickPhase.ENTRY
-                self._armed_since = None
-                return []
-            self._phase = FlickPhase.STROKE
-            self._armed_since = None
-            self._stroke_since = sample.timestamp
-            self._stroke_axis = axis
-            self._stroke_sign = sign
-            self._impulse = self._axis_value(sample.mean_flow, axis)
-            return self._maybe_fire(sample.timestamp)
-
-        if sample.timestamp - self._stroke_since > self._stroke_max_s:
-            self._phase = FlickPhase.ENTRY
-            self._clear_stroke()
-            return []
-        if sample.coherence < self._coherence_collapse:
-            self._phase = FlickPhase.ENTRY
-            self._clear_stroke()
+            if magnitude >= self._capture_floor:
+                self._open_capture(sample, magnitude)
             return []
 
-        assert self._stroke_axis is not None
-        self._impulse += self._axis_value(sample.mean_flow, self._stroke_axis)
-        return self._maybe_fire(sample.timestamp)
+        if self._phase is FlickPhase.CAPTURE:
+            return self._continue_capture(sample, magnitude)
 
-    def _is_quiet(self, active_frac: float, magnitude: float) -> bool:
+        return []
+
+    def _is_arm_quiet(self, active_frac: float, magnitude: float) -> bool:
         return active_frac < self._quiet_frac and magnitude < self._settle_mag
 
-    def _stroke_candidate(
-        self, sample: DirectionSample, magnitude: float
-    ) -> tuple[str, int] | None:
-        if sample.coherence < self._coh_min or magnitude < self._flick_mag:
-            return None
-        x, y = sample.mean_flow
-        ax, ay = abs(x), abs(y)
-        if ax >= ay:
-            if ax < self._axis_dominance * ay:
-                return None
-            return ("x", 1 if x > 0.0 else -1)
-        if ay < self._axis_dominance * ax:
-            return None
-        return ("y", 1 if y > 0.0 else -1)
+    def _open_capture(self, sample: DirectionSample, magnitude: float) -> None:
+        self._phase = FlickPhase.CAPTURE
+        # Keep _armed_since so an ambiguous classify can return to ARMED.
+        self._capture_started = sample.timestamp
+        self._quiet_since = None
+        self._buffer = []
+        self._left_energy = 0.0
+        self._right_energy = 0.0
+        self._append_capture(sample, magnitude)
 
-    def _maybe_fire(self, timestamp: float) -> list[Event]:
-        assert self._stroke_axis is not None
-        if self._impulse * self._stroke_sign < self._impulse_thresh:
-            return []
+    def _continue_capture(self, sample: DirectionSample, magnitude: float) -> list[Event]:
+        self._append_capture(sample, magnitude)
+        assert self._capture_started is not None
 
-        event = _EVENTS.get((self._stroke_axis, self._stroke_sign))
-        if event is None:
-            self._phase = FlickPhase.ENTRY
-            self._clear_stroke()
-            return []
+        if magnitude < self._capture_floor:
+            if self._quiet_since is None:
+                self._quiet_since = sample.timestamp
+        else:
+            self._quiet_since = None
 
-        axis = self._stroke_axis
-        sign = self._stroke_sign
-        self._phase = FlickPhase.FIRED
-        self._fired_at = timestamp
-        self._last_axis = axis
-        self._last_sign = sign
-        self._last_event_at = timestamp
-        return [event]
-
-    def _opposite_is_locked(self, axis: str, sign: int, timestamp: float) -> bool:
-        return (
-            axis == self._last_axis
-            and sign == -self._last_sign
-            and timestamp - self._last_event_at < self._opp_lockout_s
+        quiet_done = (
+            self._quiet_since is not None
+            and sample.timestamp - self._quiet_since >= self._burst_quiet_s
         )
+        max_done = sample.timestamp - self._capture_started >= self._burst_max_s
+        if quiet_done or max_done:
+            return self._finish_capture(sample.timestamp)
+        return []
+
+    def _append_capture(self, sample: DirectionSample, magnitude: float) -> None:
+        self._buffer.append(
+            _CaptureSample(
+                timestamp=sample.timestamp,
+                mean_flow=sample.mean_flow,
+                coherence=sample.coherence,
+                active_frac=sample.active_frac,
+                magnitude=magnitude,
+            )
+        )
+        sx = sample.mean_flow[0] * sample.active_frac
+        if sx < 0.0:
+            self._left_energy += abs(sx)
+        elif sx > 0.0:
+            self._right_energy += abs(sx)
+
+    def _finish_capture(self, end_ts: float) -> list[Event]:
+        report, event = _classify_burst(
+            self._buffer,
+            throw_impulse=self._throw_impulse,
+            coh_min=self._coh_min,
+        )
+        self._pending_burst = report
+        self._feedback = report.outcome if event is None else event.name
+        if self._feedback == "none":
+            self._feedback = "?"
+        self._feedback_at = end_ts
+        self._clear_capture()
+
+        if event is not None:
+            self._phase = FlickPhase.FIRED
+            self._fired_at = end_ts
+            self._armed_since = None
+            return [event]
+
+        # No throw: stay armed if the window remains, else EMPTY.
+        if self._armed_since is not None and end_ts - self._armed_since < self._arm_window_s:
+            self._phase = FlickPhase.ARMED
+        else:
+            self._to_empty()
+        return []
 
     def _restart_settle(self, timestamp: float, quiet: bool) -> None:
-        self._clear_stroke()
+        self._clear_capture()
         self._armed_since = None
         if quiet:
             self._phase = FlickPhase.SETTLE
@@ -251,27 +309,164 @@ class FlickDetector:
         self._phase = FlickPhase.EMPTY
         self._settle_since = None
         self._armed_since = None
-        self._clear_stroke()
+        self._clear_capture()
 
-    def _clear_stroke(self) -> None:
-        self._stroke_axis = None
-        self._stroke_sign = 0
-        self._stroke_since = 0.0
-        self._impulse = 0.0
-
-    @staticmethod
-    def _axis_value(vector: tuple[float, float], axis: str) -> float:
-        return vector[0] if axis == "x" else vector[1]
+    def _clear_capture(self) -> None:
+        self._buffer = []
+        self._capture_started = None
+        self._quiet_since = None
+        self._left_energy = 0.0
+        self._right_energy = 0.0
 
     def reset(self) -> None:
         """Reset transient state while retaining no cooldown history."""
         self._to_empty()
         self._last_t = 0.0
         self._fired_at = float("-inf")
-        self._last_axis = None
-        self._last_sign = 0
-        self._last_event_at = float("-inf")
+        self._pending_burst = None
+        self._feedback = None
+        self._feedback_at = float("-inf")
 
 
 def _magnitude(vector: tuple[float, float]) -> float:
     return math.hypot(vector[0], vector[1])
+
+
+def _sx(sample: _CaptureSample) -> float:
+    return sample.mean_flow[0] * sample.active_frac
+
+
+def _sign_sx(sx: float) -> int:
+    if abs(sx) <= _ZERO_EPS:
+        return 0
+    return 1 if sx > 0.0 else -1
+
+
+def _segment_runs(samples: list[_CaptureSample]) -> list[list[_CaptureSample]]:
+    """Split into consistent-sign runs; tolerate up to two consecutive dead samples."""
+    segments: list[list[_CaptureSample]] = []
+    current: list[_CaptureSample] = []
+    current_sign = 0
+    zero_run = 0
+
+    def flush() -> None:
+        nonlocal current, current_sign, zero_run
+        if current:
+            # Drop trailing dead samples from the segment body.
+            while current and _sign_sx(_sx(current[-1])) == 0:
+                current.pop()
+            if current:
+                segments.append(current)
+        current = []
+        current_sign = 0
+        zero_run = 0
+
+    for sample in samples:
+        sx = _sx(sample)
+        sign = _sign_sx(sx)
+        if sign == 0:
+            if current_sign == 0:
+                continue
+            zero_run += 1
+            if zero_run > _MAX_DEAD_IN_SEGMENT:
+                flush()
+            else:
+                current.append(sample)
+            continue
+
+        zero_run = 0
+        if current_sign == 0:
+            current_sign = sign
+            current = [sample]
+        elif sign == current_sign:
+            current.append(sample)
+        else:
+            flush()
+            current_sign = sign
+            current = [sample]
+
+    flush()
+    return segments
+
+
+def _integrate_segment(samples: list[_CaptureSample]) -> BurstSegment:
+    """Time-integrate weighted horizontal flow and coherence over one segment."""
+    assert samples
+    sign = 0
+    for sample in samples:
+        sign = _sign_sx(_sx(sample))
+        if sign != 0:
+            break
+    assert sign != 0
+
+    integral = 0.0
+    coh_weight = 0.0
+    coh_sum = 0.0
+    for index, sample in enumerate(samples):
+        if index == 0:
+            if len(samples) >= 2:
+                dt = samples[1].timestamp - sample.timestamp
+            else:
+                dt = 1.0 / 15.0
+        else:
+            dt = sample.timestamp - samples[index - 1].timestamp
+        dt = max(dt, 0.0)
+        sx = _sx(sample)
+        integral += sx * dt
+        weight = max(sample.active_frac, 0.0)
+        coh_sum += sample.coherence * weight
+        coh_weight += weight
+
+    duration = samples[-1].timestamp - samples[0].timestamp
+    if len(samples) == 1:
+        duration = max(duration, 1.0 / 15.0)
+    mean_coh = coh_sum / coh_weight if coh_weight > _ZERO_EPS else 0.0
+    return BurstSegment(
+        sign=sign,
+        integral=integral,
+        duration=duration,
+        mean_coherence=mean_coh,
+    )
+
+
+def _classify_burst(
+    samples: list[_CaptureSample],
+    *,
+    throw_impulse: float,
+    coh_min: float,
+) -> tuple[BurstReport, Event | None]:
+    if not samples:
+        report = BurstReport(
+            start_ts=0.0,
+            end_ts=0.0,
+            n_samples=0,
+            segments=(),
+            outcome="none",
+            y_integral=0.0,
+        )
+        return report, None
+
+    y_integral = 0.0
+    for index, sample in enumerate(samples):
+        if index == 0:
+            dt = (samples[1].timestamp - sample.timestamp) if len(samples) >= 2 else 1.0 / 15.0
+        else:
+            dt = sample.timestamp - samples[index - 1].timestamp
+        y_integral += sample.mean_flow[1] * sample.active_frac * max(dt, 0.0)
+
+    segments = tuple(_integrate_segment(run) for run in _segment_runs(samples))
+    event: Event | None = None
+    for segment in segments:
+        if abs(segment.integral) >= throw_impulse and segment.mean_coherence >= coh_min:
+            event = Event.STROKE_RIGHT if segment.sign > 0 else Event.STROKE_LEFT
+            break
+
+    report = BurstReport(
+        start_ts=samples[0].timestamp,
+        end_ts=samples[-1].timestamp,
+        n_samples=len(samples),
+        segments=segments,
+        outcome=event.name if event is not None else "none",
+        y_integral=y_integral,
+    )
+    return report, event

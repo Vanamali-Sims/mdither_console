@@ -18,9 +18,8 @@ from motioncon.vision.difference import to_gray
 from motioncon.vision.flow import FlowAnalyzer
 
 EXPECTED = {
-    "raise_settle_flick_up": Event.FLICK_UP,
-    "raise_settle_flick_down": Event.FLICK_DOWN,
-    "raise_settle_swipe_left": Event.SWIPE_LEFT,
+    "stroke_left": Event.STROKE_LEFT,
+    "stroke_right": Event.STROKE_RIGHT,
 }
 DISTRACTORS = {"typing", "head_turn", "lean_in_out", "raise_and_lower_only"}
 VIDEO_SUFFIXES = {".avi", ".mp4", ".mov", ".mkv"}
@@ -38,6 +37,7 @@ class LabelMetrics:
     precision: float
     recall: float
     false_positive_rate: float
+    ambiguous_rate: float
     latency_ms: float | None
 
 
@@ -56,14 +56,12 @@ def make_pipeline(settings: Settings) -> tuple[FlowAnalyzer, FlickDetector]:
         settle_s=settings.settle_s,
         settle_mag=settings.settle_mag,
         arm_window_s=settings.arm_window_s,
+        capture_floor=settings.capture_floor,
+        burst_quiet_s=settings.burst_quiet_s,
+        burst_max_s=settings.burst_max_s,
+        throw_impulse=settings.throw_impulse,
         coh_min=settings.coh_min,
-        coherence_collapse=settings.coherence_collapse,
-        flick_mag=settings.flick_mag,
-        axis_dominance=settings.axis_dominance,
-        impulse_thresh=settings.impulse_thresh,
-        stroke_max_s=settings.stroke_max_s,
         refractory_s=settings.refractory_s,
-        opp_lockout_s=settings.opp_lockout_s,
     )
     return flow, detector
 
@@ -136,6 +134,7 @@ def evaluate(
             detected_clips = sum(
                 any(item.event is expected for item in result) for result in results
             )
+            ambiguous_clips = sum(1 for result in results if not result)
             latencies = [
                 next(item.timestamp for item in result if item.event is expected) * 1000.0
                 for result in results
@@ -146,6 +145,7 @@ def evaluate(
                 precision=correct / predicted if predicted else 0.0,
                 recall=detected_clips / len(results),
                 false_positive_rate=0.0,
+                ambiguous_rate=ambiguous_clips / len(results),
                 latency_ms=statistics.mean(latencies) if latencies else None,
             )
         else:
@@ -155,6 +155,7 @@ def evaluate(
                 precision=1.0 if false_clips == 0 else 0.0,
                 recall=1.0,
                 false_positive_rate=false_clips / len(results),
+                ambiguous_rate=0.0,
                 latency_ms=None,
             )
     return metrics, confusion
@@ -163,12 +164,16 @@ def evaluate(
 def print_report(metrics: dict[str, LabelMetrics], confusion: dict[str, dict[str, int]]) -> None:
     """Print metrics and a compact confusion summary."""
     print("Per-label metrics")
-    print(f"{'label':32} {'clips':>5} {'precision':>9} {'recall':>7} {'FPR':>7} {'latency':>10}")
+    print(
+        f"{'label':32} {'clips':>5} {'precision':>9} {'recall':>7} "
+        f"{'FPR':>7} {'ambig':>7} {'latency':>10}"
+    )
     for label, item in sorted(metrics.items()):
         latency = "-" if item.latency_ms is None else f"{item.latency_ms:.0f} ms"
         print(
             f"{label:32} {item.clips:5d} {item.precision:9.3f} "
-            f"{item.recall:7.3f} {item.false_positive_rate:7.3f} {latency:>10}"
+            f"{item.recall:7.3f} {item.false_positive_rate:7.3f} "
+            f"{item.ambiguous_rate:7.3f} {latency:>10}"
         )
 
     columns = [event.name for event in Event] + ["NONE"]
@@ -176,6 +181,16 @@ def print_report(metrics: dict[str, LabelMetrics], confusion: dict[str, dict[str
     print(f"{'actual':32} " + " ".join(f"{column:>12}" for column in columns))
     for label, row in sorted(confusion.items()):
         print(f"{label:32} " + " ".join(f"{row[column]:12d}" for column in columns))
+
+    direction_labels = [label for label in EXPECTED if label in metrics]
+    if direction_labels:
+        print("\nPer-direction summary")
+        for label in sorted(direction_labels):
+            item = metrics[label]
+            print(
+                f"  {label}: precision={item.precision:.3f} recall={item.recall:.3f} "
+                f"ambiguous={item.ambiguous_rate:.3f}"
+            )
 
     raise_only = metrics.get("raise_and_lower_only")
     if raise_only is not None:
@@ -205,6 +220,12 @@ def find_regressions(metrics: dict[str, LabelMetrics], baseline_path: Path) -> l
             regressions.append(
                 f"{label}: false_positive_rate {new['false_positive_rate']:.3f} "
                 f"> {old['false_positive_rate']:.3f}"
+            )
+        if "ambiguous_rate" in old and float(new.get("ambiguous_rate", 0.0)) > float(
+            old["ambiguous_rate"]
+        ) + 1e-9:
+            regressions.append(
+                f"{label}: ambiguous_rate {new['ambiguous_rate']:.3f} > {old['ambiguous_rate']:.3f}"
             )
         old_latency = old.get("latency_ms")
         new_latency = new.get("latency_ms")

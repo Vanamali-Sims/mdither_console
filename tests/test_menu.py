@@ -18,24 +18,26 @@ def demo_menu() -> Menu:
     )
 
 
-def test_flick_down_steps_forward_and_wraps() -> None:
+def test_stroke_left_steps_forward_and_wraps() -> None:
     menu = demo_menu()
     for _ in range(3):
-        menu.handle_event(Event.FLICK_DOWN)
+        menu.handle_event(Event.STROKE_LEFT)
     assert menu.selected_index == 0
 
 
-def test_flick_up_steps_backward_and_wraps() -> None:
+def test_stroke_right_steps_backward_and_wraps() -> None:
     menu = demo_menu()
-    menu.handle_event(Event.FLICK_UP)
+    menu.handle_event(Event.STROKE_RIGHT)
     assert menu.selected_index == 2
 
 
-def test_swipe_left_is_back_and_noop_at_root() -> None:
+def test_gestures_do_not_navigate_back() -> None:
     menu = demo_menu()
-    assert menu.handle_event(Event.SWIPE_LEFT) is None
+    menu.handle_event(Event.STROKE_LEFT)
+    menu.handle_event(Event.STROKE_RIGHT)
     assert menu.depth == 0
-    assert menu.selected_index == 0
+    assert not menu.can_go_back
+    assert not menu.back()
 
 
 def test_initial_state() -> None:

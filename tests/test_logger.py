@@ -18,7 +18,7 @@ class TestJsonlLogger:
     def test_writes_timestamped_records(self, tmp_path: Path) -> None:
         path = tmp_path / "events.jsonl"
         with JsonlLogger(path, clock=fixed_clock) as log:
-            log.log("gesture", event="SWIPE_LEFT", cursor=[0.4, 0.6])
+            log.log("gesture", event="STROKE_LEFT", cursor=[0.4, 0.6])
             log.log("frame", energy=0.02, fps=30.1)
 
         lines = path.read_text(encoding="utf-8").splitlines()
@@ -27,7 +27,7 @@ class TestJsonlLogger:
         assert first == {
             "ts": 123.456,
             "kind": "gesture",
-            "event": "SWIPE_LEFT",
+            "event": "STROKE_LEFT",
             "cursor": [0.4, 0.6],
         }
         second = json.loads(lines[1])

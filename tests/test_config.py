@@ -24,14 +24,14 @@ class TestSettings:
         assert 0.0 < s.presence_floor < 1.0
         assert 0.0 < s.quiet_frac < 1.0
         assert s.settle_s > 0.0
-        assert s.settle_mag < s.flick_mag
+        assert s.settle_mag > 0.0
         assert s.arm_window_s > 0.0
-        assert 0.0 <= s.coherence_collapse < s.coh_min <= 1.0
-        assert s.axis_dominance >= 1.0
-        assert s.impulse_thresh > 0.0
-        assert s.stroke_max_s > 0.0
+        assert 0.0 < s.capture_floor
+        assert s.burst_quiet_s > 0.0
+        assert s.burst_max_s > s.burst_quiet_s
+        assert s.throw_impulse > 0.0
+        assert 0.0 < s.coh_min <= 1.0
         assert s.refractory_s > 0.0
-        assert s.opp_lockout_s >= s.refractory_s
         assert s.telemetry_frame_stride >= 1
 
     def test_immutable(self) -> None:
@@ -44,9 +44,8 @@ class TestEnums:
     def test_all_gesture_events_exist(self) -> None:
         names = {e.name for e in Event}
         assert names == {
-            "FLICK_UP",
-            "FLICK_DOWN",
-            "SWIPE_LEFT",
+            "STROKE_LEFT",
+            "STROKE_RIGHT",
         }
 
     def test_color_schemes_expose_rgb_pairs(self) -> None:
